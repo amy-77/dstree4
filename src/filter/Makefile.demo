@@ -1,0 +1,17 @@
+CC=g++
+CFLAGS=-std=c++17 -Wall -O2
+LDFLAGS=-L/usr/lib/x86_64-linux-gnu -lgsl -lgslcblas -lm
+EIGEN_INCLUDE=-I/home/qwang/softwares/anaconda3/envs/leafi/include/eigen3
+
+all: demo_regional_spline
+
+demo_regional_spline: demo_regional_spline.cc
+	$(CC) $(CFLAGS) $(EIGEN_INCLUDE) -o $@ $< $(LDFLAGS)
+
+clean:
+	rm -f demo_regional_spline demo_regional_spline.o
+
+run: demo_regional_spline
+	./demo_regional_spline
+
+.PHONY: all clean run 

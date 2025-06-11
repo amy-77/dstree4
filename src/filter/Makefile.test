@@ -1,0 +1,33 @@
+CXX = g++
+CXXFLAGS = -std=c++17 -Wall -O2
+INCLUDES = -I. -I../common -I../util -I../../third_party/eigen -I../../third_party -I../../lib/spdlog-1.11.0/include
+LDFLAGS = -L/usr/lib/x86_64-linux-gnu
+LIBS = -lgsl -lgslcblas -lm
+
+# Define a macro to use RVM instead of GAM (to match the project configuration)
+DEFINES = -DUSE_DLIB_GAM -DDLIB_NO_GUI_SUPPORT -DDLIB_USE_BLAS -DDLIB_USE_LAPACK -DDLIB_USE_CUDA=0
+
+# Source files
+TEST_SRC = test_regional_spline.cc conformal.cc
+OBJS = $(TEST_SRC:.cc=.o)
+
+# Output executable
+TARGET = test_regional_spline
+
+all: $(TARGET)
+
+# Compile all source files to object files
+%.o: %.cc
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(DEFINES) -c $< -o $@
+
+# Link object files to create the executable
+$(TARGET): $(OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LIBS)
+
+clean:
+	rm -f $(TARGET) $(OBJS)
+
+run: $(TARGET)
+	./$(TARGET)
+
+.PHONY: all clean run 
