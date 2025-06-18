@@ -671,7 +671,21 @@ RESPONSE dstree::Index::filter_collect_mthread(){
 
 
   // --------1. 近似搜索: 遍历每个query，找当前query最可能落在哪个叶子节点，就计算该叶子节点下的1NN-------
+  
+  // 添加进度跟踪
+  auto start_time = std::chrono::high_resolution_clock::now();
+  ID_TYPE total_queries = config_.get().filter_train_nexample_;
+  
   for (ID_TYPE query_id = 0; query_id < config_.get().filter_train_nexample_; ++query_id){
+    // 每处理500个query打印一次进度
+    if (query_id > 0 && query_id % 500 == 0) {
+      auto current_time = std::chrono::high_resolution_clock::now();
+      auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
+      double progress = (double)query_id / total_queries * 100.0;
+      printf("处理进度: %ld/%ld (%.1f%%), 已用时: %ld 秒\n", 
+             query_id, total_queries, progress, elapsed.count());
+    }
+    
     VALUE_TYPE *series_ptr = filter_train_query_ptr_ + config_.get().series_length_ * query_id;
 
     visited_node_counter = 0;
@@ -777,6 +791,12 @@ RESPONSE dstree::Index::filter_collect_mthread(){
     //   nnn_to_return -= 1;
     // }
   }
+
+  // 添加处理完成的总结信息
+  auto end_time = std::chrono::high_resolution_clock::now();
+  auto total_elapsed = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
+  printf("查询处理完成! 总共处理: %ld 个查询, 总用时: %ld 秒\n", 
+         total_queries, total_elapsed.count());
 
   // 在释放内存前，先销毁 mutex
   pthread_mutex_destroy(answer_mutex.get());
@@ -954,7 +974,13 @@ void train_thread_F(TrainCache &train_cache) {
         // printf("Thread %d: 开始训练过滤器 ID: %ld\n", train_cache.thread_id_, static_cast<long>(filter_id));
         try {
           // 这里调用的filter.train和单线程调用的是一样的，里面包含了Conformal Prediction的过程
+          auto train_start = std::chrono::high_resolution_clock::now();
+
           RESPONSE result = filter.get().batch_train();
+          auto train_end = std::chrono::high_resolution_clock::now();
+          auto train_duration = std::chrono::duration_cast<std::chrono::milliseconds>(train_end - train_start);
+          printf("Thread %d: 过滤器 ID: %ld 训练耗时: %ld ms\n", 
+                 train_cache.thread_id_, static_cast<long>(filter_id), train_duration.count());
           if (result == SUCCESS) {
             active_count++;
             // printf("Thread %d: 成功训练过滤器 ID: %ld\n", train_cache.thread_id_, static_cast<long>(filter_id));
@@ -1094,22 +1120,19 @@ RESPONSE dstree::Index::filter_train_mthread() {
 
 
 //  这个是train filter的过程，这个函数被总函数 dstree::Index::build() 调用
-RESPONSE dstree::Index::train(bool is_retrain)
-{
+RESPONSE dstree::Index::train(bool is_retrain){
   printf("-----进入dstree::Index::train()--------\n");
   // ---------------------- 1. 生成或加载训练数据  ----------------ßß------
   // 创建查询生成器，用于生成训练过滤器的查询数据
   // local query generation is called after collecting global results
   dstree::Synthesizer query_synthesizer(config_, nleaf_);
   // filter_query_filepath_ 实际输入了，是用来训练filter的查询数据的文件路径
-  if (!fs::exists(config_.get().filter_query_filepath_))
-  {
+  if (!fs::exists(config_.get().filter_query_filepath_)){
     // 不走下面这个分支，而是else分支，else分支不重新train filter
     printf("[DEBUG] Filter query file does not exist. Generating synthetic queries...\n");
     assert(!is_retrain); // not applicable to loaded filters
 
-    if (!config_.get().filter_query_filepath_.empty())
-    {
+    if (!config_.get().filter_query_filepath_.empty()){
       spdlog::error("filter train query filepath {:s} does not exist", config_.get().filter_query_filepath_);
       return FAILURE;
     }
@@ -2100,15 +2123,25 @@ RESPONSE dstree::Index::search(bool is_profile){
 
   // ==================== 4. 算法核心调整模块 ====================
   printf("config_.get().filter_conformal_adjust_confidence_by_recall_ = %d\n",config_.get().filter_conformal_adjust_confidence_by_recall_);
-  // if (config_.get().require_neurofilter_ && config_.get().filter_is_conformal_ && config_.get().filter_conformal_adjust_confidence_by_recall_){
-  //   // allocator_.get()->set_batch_confidence_from_recall(this->get_query_knn_nodes());
-  //   // 在index.cc或其他地方
-  //   // 将unique_ptr转换为shared_ptr
-  //   // std::shared_ptr<dstree::Node> shared_root(root_.get(), [](dstree::Node*){});  // 使用自定义删除器避免重复删除
-  //   // allocator_.get()->simulate_full_search_for_recall(shared_root);
-  //   allocator_.get()->document_cp_dist(this->get_query_knn_nodes());
-  // }
-  
+  if (config_.get().require_neurofilter_ && config_.get().filter_is_conformal_ && config_.get().filter_conformal_adjust_confidence_by_recall_){
+    auto adjust_confidence_start_time = std::chrono::high_resolution_clock::now();
+    
+    // allocator_.get()->set_batch_confidence_from_recall(this->get_query_knn_nodes());
+    // 在index.cc或其他地方
+    // 将unique_ptr转换为shared_ptr
+    std::shared_ptr<dstree::Node> shared_root(root_.get(), [](dstree::Node*){});  //  total error  使用自定义删除器避免重复删除
+    // allocator_.get()->simulate_full_search_for_recall(shared_root); //max error?
+
+    allocator_.get()->simulate_full_search_for_recall_alpha_based(shared_root); // total error
+    // allocator_.get()->document_cp_dist(this->get_query_knn_nodes());
+    
+    auto adjust_confidence_end_time = std::chrono::high_resolution_clock::now();
+    auto adjust_confidence_duration = std::chrono::duration_cast<std::chrono::microseconds>(adjust_confidence_end_time - adjust_confidence_start_time);
+    printf("算法核心调整模块执行时间: %.3f 秒\n", adjust_confidence_duration.count() / 1000000.0);
+    spdlog::info("算法核心调整模块执行时间: {:.3f} 秒", adjust_confidence_duration.count() / 1000000.0);
+  }
+
+
   printf("\n---------执行搜索和计算Recall模块------------\n");
   // ==================== 5. 执行搜索和计算Recall模块 ====================
   if (!is_profile){ // 当不是profile模式时，执行recall计算

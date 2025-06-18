@@ -66,6 +66,7 @@ class Allocator {
   RESPONSE assign();
   RESPONSE reassign();
   RESPONSE calculate_recall_coverage_pairs();
+  RESPONSE calculate_alpha_based_recall_coverage_pairs();
 
   // RESPONSE set_batch_confidence_from_recall(const std::vector<upcite::dstree::Answers>& train_answers);
   // RESPONSE set_batch_confidence_from_recall(const std::vector<Answers>& train_answers);
@@ -73,32 +74,26 @@ class Allocator {
   // 保存(recall, coverage)对到CSV文件
   RESPONSE save_recall_coverage_pairs(
       const std::vector<std::vector<std::pair<ERROR_TYPE, ERROR_TYPE>>>& error_recall_cov_pairs);
-  // 新增：保存(recall, coverage, error)三元组到CSV文件，针对每个filter的每个batch
-  RESPONSE save_recall_coverage_error_pairs(
+  RESPONSE save_recall_alpha_based_coverage_pairs(
       const std::vector<std::vector<std::pair<ERROR_TYPE, ERROR_TYPE>>>& error_recall_cov_pairs);
+
+
   // 新增：多批次校准集的置信区间设置函数
   RESPONSE set_batch_confidence_from_recall(const std::unordered_map<ID_TYPE, std::unordered_map<ID_TYPE, ID_TYPE>>& query_knn_nodes);
   
-  // 新增：保存带批次召回率的置信区间计算函数
-  RESPONSE set_batch_confidence_from_recall_save(const std::unordered_map<ID_TYPE, std::unordered_map<ID_TYPE, ID_TYPE>>& query_knn_nodes);
   
+
+  RESPONSE document_cp_dist(const std::unordered_map<ID_TYPE, std::unordered_map<ID_TYPE, ID_TYPE>>& query_knn_nodes);
   /**
    * 记录校准集所有批次的query的真实knn节点对应的真实距离、minbsf、pred_distance、abs_error和true_error
    * 
    * @param query_knn_nodes 查询ID到节点分布的映射，格式为<查询ID, <节点ID, 该节点下的真实KNN数量>>
    * @return RESPONSE 操作成功返回SUCCESS，否则返回FAILURE
    */
-  RESPONSE document_cp_dist(const std::unordered_map<ID_TYPE, std::unordered_map<ID_TYPE, ID_TYPE>>& query_knn_nodes);
 
 
 
 
-  // 新增：保存节点访问和减枝统计数据
-  RESPONSE save_node_access_stats(
-      const std::vector<std::vector<ID_TYPE>>& batch_query_ids,
-      ID_TYPE num_batches,
-      ID_TYPE num_error_quantiles,
-      const std::unordered_map<ID_TYPE, std::unordered_map<ID_TYPE, ID_TYPE>>& query_knn_nodes);
   
   ID_TYPE get_node_size_threshold() const {
     return node_size_threshold_;
@@ -109,6 +104,27 @@ class Allocator {
 
   // 新增：模拟完整dstree搜索过程，重新计算准确的recall（接受root参数）
   RESPONSE simulate_full_search_for_recall(std::shared_ptr<dstree::Node> root);
+
+  // 新增：模拟完整dstree搜索过程，重新计算准确的recall（接受root参数），基于alphas_
+  RESPONSE simulate_full_search_for_recall_alpha_based(std::shared_ptr<dstree::Node> root);
+
+
+  // 新增：模拟单个查询的dstree搜索过程，基于recall
+  ID_TYPE simulate_dstree_search_for_query(
+      ID_TYPE query_id, 
+      ID_TYPE batch_i, 
+      ID_TYPE error_i,
+      const std::unordered_map<ID_TYPE, size_t>& node_id_to_index,
+      std::shared_ptr<dstree::Node> root);
+
+  // 新增：模拟单个查询的dstree搜索过程，基于alphas_
+  ID_TYPE simulate_dstree_search_alpha_based_for_query(
+      ID_TYPE query_id, 
+      ID_TYPE batch_i, 
+      ID_TYPE error_i,
+      const std::unordered_map<ID_TYPE, size_t>& node_id_to_index,
+      std::shared_ptr<dstree::Node> root);
+
 
  private:
  //QYL
@@ -148,14 +164,6 @@ class Allocator {
     ID_TYPE num_batches,
     ID_TYPE num_error_quantiles,
     const std::unordered_map<ID_TYPE, std::unordered_map<ID_TYPE, ID_TYPE>>& query_knn_nodes);
-
-  // 新增：模拟单个查询的dstree搜索过程
-  ID_TYPE simulate_dstree_search_for_query(
-      ID_TYPE query_id, 
-      ID_TYPE batch_i, 
-      ID_TYPE error_i,
-      const std::unordered_map<ID_TYPE, size_t>& node_id_to_index,
-      std::shared_ptr<dstree::Node> root);
 
   // TODO memory is continuous instead of discrete
 //  std::unique_ptr<VALUE_TYPE> total_gain_matrix_;

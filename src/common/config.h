@@ -56,6 +56,7 @@ class Config {
   ID_TYPE search_max_nnode_;
   // batch 
   ID_TYPE filter_conformal_num_batches_;
+  ID_TYPE filter_conformal_batch_size_;
   VALUE_TYPE filter_valid_ratio_;
   
   // New parameters for combinatorial calibration batch generation

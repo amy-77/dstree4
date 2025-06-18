@@ -103,6 +103,7 @@ class Filter {
   VALUE_TYPE get_nn_distance(ID_TYPE pos) const { return global_lnn_distances_[pos]; };
   //qyl
   VALUE_TYPE get_bsf_distance_test(ID_TYPE pos) const { return global_bsf_distances_test_[pos]; };
+  VALUE_TYPE get_alphas_size() const { return conformal_predictor_->get_alphas_size(); };
 
 
 
@@ -210,7 +211,7 @@ class Filter {
   void reset_regression_coefficients(const std::vector<double>& coeffs, VALUE_TYPE alpha);
 
   VALUE_TYPE get_abs_error_interval_by_pos(ID_TYPE pos) const { 
-    printf("进入filter::get_abs_error_interval_by_pos \n");
+    // printf("进入filter::get_abs_error_interval_by_pos \n");
     return conformal_predictor_->get_alpha_by_pos(pos); };
   
   VALUE_TYPE get_batch_abs_error_interval_by_pos(ID_TYPE batch_i, ID_TYPE pos) const {
@@ -342,6 +343,8 @@ class Filter {
 
   // Debug: print the full contents of global distance vectors (bsf / lnn / pred)
   void debug_print_global_vectors() const;
+
+  RESPONSE save_prediction_errors(const std::string& filepath, ID_TYPE start_index);
 
  private:
   std::vector<VALUE_TYPE> global_bsf_distances_;

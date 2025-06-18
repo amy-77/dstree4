@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <cmath>
 
 
 // #include "interpolation.h"  // ALGLIB的二维插值头文件
@@ -53,25 +54,40 @@ RESPONSE upcite::ConformalRegressor::fit(std::vector<ERROR_TYPE> &residuals) {
   // 对alphas_进行排序（从小到大）
   std::sort(alphas_.begin(), alphas_.end()); // non-decreasing
   
-  // printf("core_ = %d\n", core_);
-  if (core_ == DISCRETE) {
-    is_fitted_ = true;
-    is_trial_ = false;
-
-    printf("\n !!!!!!!!!!!!!!  [DEBUG] confidence_level_ = %.3f\n", static_cast<float>(confidence_level_));    
-    abs_error_i_ = static_cast<ID_TYPE>(static_cast<VALUE_TYPE>(alphas_.size()) * confidence_level_);
-    printf("is_fitted_ = true, core_ == DISCRETE");
-    printf("\n !!!!!!!!!!!  [DEBUG] 检查分位数索引: abs_error_i_ = %ld, alphas_.size() = %ld\n", 
-       static_cast<long>(abs_error_i_), 
-       static_cast<long>(alphas_.size()));
-    // 根据置信水平选择对应的分位数
-    alpha_ = alphas_[abs_error_i_]; // suspicious for a segfault
-    printf("\n !!!!!!!!!!!  [DEBUG] alpha_ = %.3f\n", static_cast<float>(alpha_));
-  } else { // core_ == SPLINE
-    // fit later with recalls as input
-    // printf("is_fitted_ = false, core_ == Spline, fit later with recalls as input\n");
-    is_fitted_ = false;
+  // 添加哨兵值
+  if (!alphas_.empty()) {
+    // 计算统计量
+    double sum = 0.0;
+    double max_val = alphas_.back();  // 排序后最大值在末尾
+    
+    for (const auto& alpha : alphas_) {
+      sum += alpha;
+    }
+    double mean = sum / alphas_.size();
+    
+    // 计算标准差
+    double sum_sq_diff = 0.0;
+    for (const auto& alpha : alphas_) {
+      double diff = alpha - mean;
+      sum_sq_diff += diff * diff;
+    }
+    double std_dev = std::sqrt(sum_sq_diff / alphas_.size());
+    
+    // 计算哨兵值：max(最大值, mean + 3*std)
+    double sentinel_value = std::max(max_val, mean + 3.0 * std_dev);
+    
+    // printf("添加哨兵值: max=%.6f, mean=%.6f, std=%.6f, mean+3*std=%.6f, 选择哨兵值=%.6f\n",
+    //        max_val, mean, std_dev, mean + 3.0 * std_dev, sentinel_value);
+    
+    // 在开头插入0
+    alphas_.insert(alphas_.begin(), 0.0);
+    
+    // 在结尾添加哨兵值
+    alphas_.push_back(static_cast<ERROR_TYPE>(sentinel_value));
+    
+    // printf("添加哨兵值后 alphas_.size() = %zu\n", alphas_.size());
   }
+  
   return SUCCESS;
 }
 
@@ -96,16 +112,8 @@ RESPONSE upcite::ConformalRegressor::fit_batch(const std::vector<std::vector<ERR
     }
     // 复制并排序此批次的残差
     std::vector<ERROR_TYPE> sorted_residuals = residuals;
-    
     // 排序残差值
     std::sort(sorted_residuals.begin(), sorted_residuals.end());
-    
-    // 确保所有值非负（传入的残差应该已经是正的，但为了安全起见）
-    // for (auto& val : sorted_residuals) {
-    //   if (val < 0) {
-    //     val = 0;
-    //   }
-    // }
     
     // 计算此批次的alphas
     std::vector<VALUE_TYPE> batch_alpha_values;
@@ -115,33 +123,11 @@ RESPONSE upcite::ConformalRegressor::fit_batch(const std::vector<std::vector<ERR
       batch_alpha_values.push_back(sorted_residuals[i]);
     }
     batch_alphas_[batch_idx] = std::move(batch_alpha_values);
-    // printf("批次 %d 的alpha值数量: %zu\n", batch_idx, batch_alphas_[batch_idx].size());
-    // 在所有批次处理完后，打印二维矩阵的大小
-    // printf("batch_alphas_ 维度: [%zu, %zu] (批次数 x 每批次alpha值数量)\n", 
-    //       batch_alphas_.size(),  // 批次数
-    //       batch_alphas_.empty() ? 0 : batch_alphas_[0].size()  // 第一个批次的大小（假设所有批次大小相同）
-    // );
-    // QYL 没问题，每个batch的误差有原本batch size+2个
-    // printf("[DEBUG] 批次 %d: 残差范围 [%.3f, %.3f], 样本数 %zu\n", 
-    //        batch_idx+1, batch_alphas_[batch_idx].front(), batch_alphas_[batch_idx].back(), 
-    //        batch_alphas_[batch_idx].size());
   }
 
-  // 打印所有批次的alphas
-  // spdlog::info("打印所有批次的alphas:");
-  // for (size_t batch_i = 0; batch_i < batch_alphas_.size(); ++batch_i) {
-  //   std::string alphas_str;
-  //   for (const auto& alpha : batch_alphas_[batch_i]) {
-  //     alphas_str += fmt::format("{:.3f} ", static_cast<double>(alpha));
-  //   }
-  //   spdlog::info("Batch {}: {}", batch_i, alphas_str);
-  // }
-  
-  // // 设置默认alphas为第一个批次的值（可选）
-  // if (!batch_alphas_.empty() && !batch_alphas_[0].empty()) {
-  //   alphas_ = batch_alphas_[0];
-  //   abs_error_i_ = 0;
-  // }
+  // 保存批处理alphas为CSV文件
+  // std::string save_path = config.save_path + "/batch_alphas.csv";
+  // save_batch_alphas_csv(save_path);
   return SUCCESS;
 }
 
@@ -151,7 +137,7 @@ RESPONSE upcite::ConformalRegressor::fit_spline(std::string &spline_core, std::v
   std::cout << "spline_core = " << spline_core << std::endl;
 
   // 打印 alphas_ 的大小
-  printf("alphas_.size() = %ld\n", static_cast<long>(alphas_.size()));
+  // printf("alphas_.size() = %ld\n", static_cast<long>(alphas_.size()));
 
   // 打印 alphas_ 的内容   
   // printf("alphas_ = [");
@@ -402,17 +388,6 @@ VALUE_TYPE upcite::ConformalPredictor::get_batch_alpha_by_pos(ID_TYPE batch_i, I
   if (pos >= batch_alphas_[batch_i].size()) {
     return constant::MAX_VALUE;
   }
-  // 打印批次alpha的完整信息
-  // printf("获取批次alpha: batch_i=%ld, pos=%ld\n", batch_i, pos);
-  // 打印所有批次的alpha值矩阵（紧凑格式）
-  // printf("\n== Batch_alpha矩阵(行:批次,列:误差分位数) ==\n");
-  // for (size_t b = 0; b < batch_alphas_.size(); ++b) {
-  //   printf("B%2zu:", b);
-  //   for (size_t p = 0; p < batch_alphas_[b].size(); ++p) {
-  //     printf("%6.3f ", batch_alphas_[b][p]);
-  //   }
-  //   printf("\n");
-  // }
   return batch_alphas_[batch_i][pos];
 }
 
@@ -441,7 +416,7 @@ VALUE_TYPE upcite::ConformalPredictor::get_alpha_by_pos(ID_TYPE pos) const {
     return constant::MAX_VALUE;
   }
   
-  printf("成功获取 alphas_[%ld]=%f\n", pos, result);
+  // printf("alphas_[%ld]=%f\n", pos, result);
   return result;
 }
 
@@ -702,34 +677,52 @@ RESPONSE upcite::ConformalPredictor::save_batch_alphas(const std::string& filepa
         printf("无法打开文件进行写入: %s\n", filepath.c_str());
         return FAILURE;
     }
-    
     // 写入类型信息和批次数量
     alphas_fout << "TYPE_SIZE=" << sizeof(ERROR_TYPE) << std::endl;
     alphas_fout << "NUM_BATCHES=" << batch_alphas_.size() << std::endl;
-    
     // 对每个批次
     for (size_t batch_i = 0; batch_i < batch_alphas_.size(); ++batch_i) {
         // 写入批次大小
         alphas_fout << "BATCH_" << batch_i << "_SIZE=" << batch_alphas_[batch_i].size() << std::endl;
-        
         // 逐个写入值，使用科学计数法确保精度
         for (size_t j = 0; j < batch_alphas_[batch_i].size(); ++j) {
             ERROR_TYPE val = batch_alphas_[batch_i][j];
-            
             // 检查值的有效性
             if (std::isnan(val) || std::isinf(val) || val < 0 || val > 1e10) {
                 printf("警告：保存批次%zu索引%zu的值%.6g无效\n", batch_i, j, (double)val);
             }
-            
             // 使用科学计数法，保证15位有效数字
             alphas_fout << std::scientific << std::setprecision(15) << val;
-            
             // 每行结束添加换行符
             alphas_fout << std::endl;
         }
     }
-    
     // printf("成功保存批次alpha值到: %s (文本格式)\n", filepath.c_str());
+    return SUCCESS;
+}
+
+// 保存批处理alphas为CSV文件（行=批次，列=alpha序号）
+RESPONSE upcite::ConformalPredictor::save_batch_alphas_csv(const std::string& filepath) const {
+    if (batch_alphas_.empty()) {
+        spdlog::error("[save_batch_alphas_csv] No batch alpha data to save");
+        return FAILURE;
+    }
+    std::ofstream fout(filepath);
+    if (!fout.is_open()) {
+        spdlog::error("[save_batch_alphas_csv] Cannot open file {}", filepath);
+        return FAILURE;
+    }
+    for (size_t batch_i = 0; batch_i < batch_alphas_.size(); ++batch_i) {
+        const auto &vec = batch_alphas_[batch_i];
+        for (size_t j = 0; j < vec.size(); ++j) {
+            fout << vec[j];
+            if (j + 1 < vec.size()) fout << ",";
+        }
+        fout << "\n";
+    }
+    fout.close();
+    spdlog::info("[save_batch_alphas_csv] saved CSV to {} (batches={})", filepath, batch_alphas_.size());
+    // printf("[save_batch_alphas_csv] saved CSV to %s (batches=%zu)\n", filepath.c_str(), batch_alphas_.size());
     return SUCCESS;
 }
 
@@ -863,8 +856,8 @@ double upcite::ConformalRegressor::predict_error_value(double recall, double cov
     // double predicted_error = predict_alglib_quadratic_spline(recall, coverage, regression_coeffs_);
      // spdlog::info("Eigen spline 的 alpha: {:.4f}, recall={:.4f}, coverage={:.4f}", 
     //             std::max(0.0, predicted_error), recall, coverage); 
-    printf("alpha: %.4f, recall=%.2f, coverage=%.2f\n", 
-                std::max(0.0, predicted_error), recall, coverage); 
+    // printf("alpha: %.4f, recall=%.2f, coverage=%.2f\n", 
+    //             std::max(0.0, predicted_error), recall, coverage); 
     return std::max(0.0, predicted_error);
 }
 
@@ -2028,7 +2021,7 @@ RESPONSE upcite::ConformalRegressor::filter_monotonic_data(
     
     // 应用异常值过滤
     if (!outlier_indices.empty()) {
-        printf("将移除 %zu 个违反单调性的小误差异常点\n", outlier_indices.size());
+        // printf("将移除 %zu 个违反单调性的小误差异常点\n", outlier_indices.size());
         
         // 打印将被移除的点
         // printf("\n将移除的异常点:\n");
@@ -2057,7 +2050,7 @@ RESPONSE upcite::ConformalRegressor::filter_monotonic_data(
         coverages = filtered_coverages;
         errors = filtered_errors;
         
-        printf("异常值过滤后剩余 %zu 个点\n", recalls.size());
+        // printf("异常值过滤后剩余 %zu 个点\n", recalls.size());
     }
     
     // 2. 按照recall分组，确保coverage增加时error也增加

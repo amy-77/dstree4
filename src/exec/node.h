@@ -103,7 +103,9 @@ class Node {
   VALUE_TYPE get_filter_pred_distance(ID_TYPE pos) const { return filter_->get_pred_distance(pos); };
   VALUE_TYPE get_filter_nn_distance(ID_TYPE pos) const { return filter_->get_nn_distance(pos); };
 
-
+  ID_TYPE get_alphas_size() const {
+    return filter_->get_alphas_size();
+  }
 
 
   std::tuple<VALUE_TYPE, VALUE_TYPE> get_filter_global_lnn_mean_std() const {
@@ -124,7 +126,6 @@ class Node {
   };
 
   VALUE_TYPE get_filter_abs_error_interval_by_pos(ID_TYPE pos) const {
-    // printf("进入node::get_filter_abs_error_interval_by_pos \n");
     return filter_->get_abs_error_interval_by_pos(pos);
   };
 

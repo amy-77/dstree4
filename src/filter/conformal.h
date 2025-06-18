@@ -55,6 +55,11 @@ class ConformalPredictor {
 
   RESPONSE set_batch_alpha_by_pos(ID_TYPE pos);
 
+  // 获取alphas_的大小
+  ID_TYPE get_alphas_size() const {
+    return static_cast<ID_TYPE>(alphas_.size());
+  }
+
   // 添加获取批次alpha值的方法
   const std::vector<std::vector<VALUE_TYPE>>& get_batch_alphas() const {
     return batch_alphas_;
@@ -81,6 +86,7 @@ class ConformalPredictor {
   
   // 添加保存批处理alphas的方法
   RESPONSE save_batch_alphas(const std::string& filepath) const;
+  RESPONSE save_batch_alphas_csv(const std::string& filepath) const;
 
   // 新增：清理批次数据
   void clear_batch_data();
@@ -111,7 +117,7 @@ class ConformalPredictor {
 
   std::vector<ERROR_TYPE> alphas_;
   std::vector<std::vector<VALUE_TYPE>> batch_alphas_; // 存储每个批次的alphas值
-
+  
 };
 
 class ConformalRegressor : public ConformalPredictor {

@@ -293,7 +293,6 @@ RESPONSE dstree::Filter::fit_conformal_predictor(bool is_trial, bool collect_run
 
 
 
-// 修改fit_batch_conformal_predictor函数, 
 // 存储误差到batch_residuals容器中和batch_alpha容器中
 RESPONSE dstree::Filter::fit_batch_conformal_predictor(
     bool is_trial,
@@ -327,15 +326,13 @@ RESPONSE dstree::Filter::fit_batch_conformal_predictor(
         
         // QYL 不取绝对值版本
         VALUE_TYPE diff = pred - target;
-        // 如果误差小于0，就把误差设为0，如果误差大于0，就直接保留
-        if (diff < 0) diff = 0;
+        if (diff < 0) diff = -diff;
 
         batch_residuals[batch_idx].push_back(diff);
         if (diff > max_diff) max_diff = diff;
         mean_diff += diff;
         num_diff += 1;
       }
-      
     }
     
     // 处理统计和哨兵值逻辑
@@ -368,7 +365,23 @@ RESPONSE dstree::Filter::fit_batch_conformal_predictor(
   // }
   
   // 使用计算好的批次残差拟合保形预测器
+  //batch_residuals是vector<vector<ERROR_TYPE>>类型，外层是batch_idx，内层是residuals，residuals的size是batch_size+2
   RESPONSE return_code = conformal_predictor_->fit_batch(batch_residuals);
+  // 保存批处理alphas为CSV文件
+
+  // 确保结果目录存在
+  std::string results_dir = config_.get().results_path_;
+  if (!results_dir.empty() && !fs::exists(results_dir)) {
+    fs::create_directories(results_dir);
+  }
+
+  // 创建子文件夹 batch_alphas_filters
+  std::string batch_alphas_dir = results_dir + "/batch_alphas_filters";
+  if (!fs::exists(batch_alphas_dir)) {
+    fs::create_directories(batch_alphas_dir);
+  }
+  std::string save_path = batch_alphas_dir + "/filter_" + std::to_string(id_) + "_batch_alphas.csv";
+  conformal_predictor_->save_batch_alphas_csv(save_path);
   
   if (return_code == FAILURE) {
     printf("[ERROR] 符合预测器拟合失败!\n");
@@ -880,24 +893,6 @@ RESPONSE dstree::Filter::batch_train(bool is_trial) {
 
     is_distances_preprocessed_ = true; 
 
-    // // 打印global_lnn_distances_和global_bsf_distances的大小
-    // printf("global_data_size_ = %zu\n", global_data_size_);
-    // printf("global_data_size_single_ = %zu\n", global_data_size_single_);
-    // printf("\n[DEBUG] 平方根后的距离值:\n");
-    // printf("global_lnn_distances_ (前10个):");
-    // for (size_t i = 0; i < std::min(global_data_size_, (ID_TYPE)10); ++i) {
-    //   printf(" %.2f", global_lnn_distances_[i]);
-    // }
-    // printf("\n");
-    // printf("global_bsf_distances_ (前10个):");
-    // for (size_t i = 0; i < std::min(global_data_size_, (ID_TYPE)10); ++i) {
-    //   printf(" %.2f", global_bsf_distances_[i]);
-    // }
-    // printf("\n");
-
-
-
-
    
   }
 
@@ -907,18 +902,37 @@ RESPONSE dstree::Filter::batch_train(bool is_trial) {
   ID_TYPE num_calib_batches = config_.get().filter_conformal_num_batches_;
   ID_TYPE num_examples_per_calib_batch = global_data_size_ / num_calib_batches;
 
-  float train_ratio = config_.get().filter_train_val_split_; 
+  // 修改：新的数据分配比例
+  // Global data: 2:1:7 (train:validate:CP training)
+  // Local data: 4:1 (train:validate)
+  
   ID_TYPE num_calib_examples;
   ID_TYPE num_batches;
   ID_TYPE remainder;
 
-  // 当前计算方式适合local data=0, 如果local data>0, 第一个if语句中会修改它的值
-  ID_TYPE num_train_examples = global_data_size_ * train_ratio; //local data>0时，num_train_examples会加上local_data_size_ * train_ratio
-  ID_TYPE num_valid_examples = global_data_size_ - num_train_examples;
-  num_global_train_examples = global_data_size_ * train_ratio;
-  ID_TYPE num_global_valid_examples = global_data_size_ - num_global_train_examples;
+  // Global data分配 (总比例2:1:7，总和为10)
+  ID_TYPE num_global_train_examples = global_data_size_ * 2 / 6;  // 20%
+  ID_TYPE num_global_valid_examples = global_data_size_ * 1 / 6;  // 10%  
+  ID_TYPE num_global_cp_examples = global_data_size_ - num_global_train_examples - num_global_valid_examples;  // 70%
 
-  // printf("全局训练集数量 num_global_train_examples = %ld\n", num_global_train_examples);
+  // Local data分配 (总比例4:1，总和为5)
+  ID_TYPE num_local_train_examples = local_data_size_ * 4 / 5;  // 80%
+  ID_TYPE num_local_valid_examples = local_data_size_ - num_local_train_examples;  // 20%
+
+  // 兼容原有变量名
+  ID_TYPE num_train_examples = num_global_train_examples + (local_data_size_ > 0 ? num_local_train_examples : 0);
+  ID_TYPE num_valid_examples = num_global_valid_examples + (local_data_size_ > 0 ? num_local_valid_examples : 0);
+
+  // printf("数据分配统计:\n");
+  // printf("num_global_train_examples: %ld (%.1f%%)\n", num_global_train_examples, (float)num_global_train_examples * 100 / global_data_size_);
+  // printf("num_global_valid_examples: %ld (%.1f%%)\n", num_global_valid_examples, (float)num_global_valid_examples * 100 / global_data_size_);
+  // printf("num_global_cp_examples: %ld (%.1f%%)\n", num_global_cp_examples, (float)num_global_cp_examples * 100 / global_data_size_);
+  // if (local_data_size_ > 0) {
+  //   printf("num_local_train_examples: %ld (%.1f%%)\n", num_local_train_examples, (float)num_local_train_examples * 100 / local_data_size_);
+  //   printf("num_local_valid_examples: %ld (%.1f%%)\n", num_local_valid_examples, (float)num_local_valid_examples * 100 / local_data_size_);
+  // }
+  // printf("num_train_examples: %ld (%.1f%%)\n", num_train_examples, (float)num_train_examples * 100 / global_data_size_);
+  // printf("num_valid_examples: %ld (%.1f%%)\n", num_valid_examples, (float)num_valid_examples * 100 / global_data_size_);
 
   // 创建数据张量
   torch::Tensor train_data, valid_data, calibration_data;
@@ -929,57 +943,64 @@ RESPONSE dstree::Filter::batch_train(bool is_trial) {
 
   // 处理全局和局部数据
   if (local_data_size_ > 0) {
-    // printf("对local data CP划分 local_data_size_ > 0\n");
-    // printf("global_data_size_: %ld\n", static_cast<long>(global_data_size_));
-    // printf("local_data_size_: %ld\n", static_cast<long>(local_data_size_));
- 
-    // 5.1.1 获取训练集的全局和局部数据 (保持不变)
+
     assert(global_data_size_ == config_.get().filter_train_num_global_example_);
     assert(local_data_size_ == config_.get().filter_train_num_local_example_);
-    // 全局和局部训练集划分
-    ID_TYPE num_local_train_examples = local_data_size_ * config_.get().filter_train_val_split_;
-    // 全局训练数据处理
+    
+    // 5.1.1 获取训练集的全局和局部数据
+    // 全局训练数据处理 (前20%的global data)
     torch::Tensor global_train_data = global_queries_.get().index({torch::indexing::Slice(0, num_global_train_examples)}).clone();
     torch::Tensor global_train_targets = torch::from_blob(global_lnn_distances_.data(), num_global_train_examples, torch::TensorOptions().dtype(TORCH_VALUE_TYPE)).to(*device_);
-    // 局部训练数据处理
+    
+    // 局部训练数据处理 (前80%的local data)
     torch::Tensor local_train_data = torch::from_blob(local_queries_.data(),{num_local_train_examples, config_.get().series_length_}, torch::TensorOptions().dtype(TORCH_VALUE_TYPE)).to(*device_);
     torch::Tensor local_train_targets = torch::from_blob(local_lnn_distances_.data(), num_local_train_examples,torch::TensorOptions().dtype(TORCH_VALUE_TYPE)).to(*device_);
+
     // 合并训练数据
     train_data = torch::cat({global_train_data, local_train_data}, 0);
     train_targets = torch::cat({global_train_targets, local_train_targets}, 0);
     
     // 5.1.2 获取验证集的全局和局部数据
-    ID_TYPE num_global_valid_examples = global_data_size_ - num_global_train_examples;
-    ID_TYPE num_local_valid_examples = local_data_size_ - num_local_train_examples;
+    // 全局验证数据：global data的第二个10%部分 (20%-30%区间)
+    torch::Tensor global_valid_data = global_queries_.get().index({torch::indexing::Slice(num_global_train_examples, num_global_train_examples + num_global_valid_examples)}).clone();
+    torch::Tensor global_valid_targets = torch::from_blob(global_lnn_distances_.data() + num_global_train_examples, num_global_valid_examples, torch::TensorOptions().dtype(TORCH_VALUE_TYPE)).to(*device_);
     
-    // 获取全局验证数据：global data中出去global train data的部分
-    global_valid_data = global_queries_.get().index({torch::indexing::Slice(num_global_train_examples, global_data_size_)}).clone();
-    global_valid_targets = torch::from_blob(global_lnn_distances_.data() + num_global_train_examples,num_global_valid_examples,torch::TensorOptions().dtype(TORCH_VALUE_TYPE)).to(*device_);
-    
-    // 获取局部验证数据：local data中出去local train data的部分
-    torch::Tensor local_valid_data = torch::from_blob(
-        local_queries_.data() + num_local_train_examples * config_.get().series_length_,
+    // 局部验证数据：local data的后20%部分
+    torch::Tensor local_valid_data = torch::from_blob(local_queries_.data() + num_local_train_examples * config_.get().series_length_,
         {num_local_valid_examples, config_.get().series_length_}, torch::TensorOptions().dtype(TORCH_VALUE_TYPE)).to(*device_);
-
-    torch::Tensor local_valid_targets = torch::from_blob(local_lnn_distances_.data() + num_local_train_examples,num_local_valid_examples, torch::TensorOptions().dtype(TORCH_VALUE_TYPE)).to(*device_);
+    torch::Tensor local_valid_targets = torch::from_blob(local_lnn_distances_.data() + num_local_train_examples, num_local_valid_examples, torch::TensorOptions().dtype(TORCH_VALUE_TYPE)).to(*device_);
     
+
     // 合并验证数据
     valid_data = torch::cat({global_valid_data, local_valid_data}, 0);
     valid_targets = torch::cat({global_valid_targets, local_valid_targets}, 0);
 
-    num_train_examples = num_global_train_examples + num_local_train_examples;
-    num_valid_examples = num_global_valid_examples + num_local_valid_examples;
+    // 5.1.3 获取CP训练数据
+    // CP训练数据：global data的最后70%部分 (30%-100%区间)
+    ID_TYPE global_cp_start_idx = num_global_train_examples + num_global_valid_examples;
+    torch::Tensor global_cp_data = global_queries_.get().index({torch::indexing::Slice(global_cp_start_idx, global_data_size_)}).clone();
+    torch::Tensor global_cp_targets = torch::from_blob(global_lnn_distances_.data() + global_cp_start_idx, num_global_cp_examples, torch::TensorOptions().dtype(TORCH_VALUE_TYPE)).to(*device_);
 
-    assert(train_data.size(0) == num_train_examples && train_targets.size(0) == num_train_examples);
-    assert(valid_data.size(0) == num_valid_examples && valid_targets.size(0) == num_valid_examples);
-  
-    // 修改：只使用global_valid_data作为校准数据，local_valid_data不参与校准
-    // 将local_valid_data保留为验证集
-    calibration_data = global_valid_data;
-    calibration_targets = global_valid_targets;
+    // 验证数据分配正确性
+    assert(train_data.size(0) == (num_global_train_examples + num_local_train_examples));
+    assert(valid_data.size(0) == (num_global_valid_examples + num_local_valid_examples));
+    assert(global_cp_data.size(0) == num_global_cp_examples);
+
+    // printf("global_train_data.size(0): %ld\n", static_cast<long>(global_train_data.size(0)));
+    // printf("local_train_data.size(0): %ld\n", static_cast<long>(local_train_data.size(0)));
+    // printf("global_valid_data.size(0): %ld\n", static_cast<long>(global_valid_data.size(0)));
+    // printf("local_valid_data.size(0): %ld\n", static_cast<long>(local_valid_data.size(0)));
+
+    // printf("global_cp_data.size(0): %ld\n", static_cast<long>(global_cp_data.size(0)));
+    // printf("train_data.size(0): %ld\n", static_cast<long>(train_data.size(0)));
+    // printf("valid_data.size(0): %ld\n", static_cast<long>(valid_data.size(0)));
+
+    // 使用global CP data作为校准数据
+    calibration_data = global_cp_data;
+    calibration_targets = global_cp_targets;
     
-    // 确定全局验证样本数量，只使用这部分数据作为校准集
-    num_calib_examples = global_valid_data.size(0);
+    // 确定校准样本数量
+    num_calib_examples = global_cp_data.size(0);
     // printf("校准数据总量: %d\n", num_calib_examples);
     
     // 如果启用组合方法生成校准批次
@@ -988,6 +1009,7 @@ RESPONSE dstree::Filter::batch_train(bool is_trial) {
       if (generate_calibration_batches(calibration_data, calibration_targets, 
                                        calib_data_batches, calib_target_batches,
                                        calib_query_ids) == FAILURE) {
+                                        
         printf("生成组合校准批次失败\n");
         return FAILURE;
       }
@@ -1045,28 +1067,34 @@ RESPONSE dstree::Filter::batch_train(bool is_trial) {
   
   } else {
 
+    // 只使用全局数据时的多批次CP划分 local_data_size_ <= 0
+
+
     printf("只使用全局数据时的多批次CP划分 local_data_size_ <= 0\n");
     // ========== 关键修改点 2: 只使用全局数据时的多批次划分 ==========
-    // 训练数据    
-    train_data = global_queries_.get().index({torch::indexing::Slice(0, num_train_examples)}).clone();
+    
+    // 训练数据 (前20%的global data)
+    train_data = global_queries_.get().index({torch::indexing::Slice(0, num_global_train_examples)}).clone();
     train_targets = torch::from_blob(global_lnn_distances_.data(),
-                                   num_train_examples,
+                                   num_global_train_examples,
                                    torch::TensorOptions().dtype(TORCH_VALUE_TYPE)).to(*device_);
 
-    // 验证数据
+    // 验证数据 (20%-30%区间的global data)
     valid_data = global_queries_.get().index({torch::indexing::Slice(
-        num_train_examples, num_train_examples + num_valid_examples)}).clone();
-    valid_targets = torch::from_blob(global_lnn_distances_.data() + num_train_examples,
-                                   num_valid_examples,
+        num_global_train_examples, num_global_train_examples + num_global_valid_examples)}).clone();
+    valid_targets = torch::from_blob(global_lnn_distances_.data() + num_global_train_examples,
+                                   num_global_valid_examples,
                                    torch::TensorOptions().dtype(TORCH_VALUE_TYPE)).to(*device_);
     
-    // 修改：只使用global_valid_data作为校准数据，local_valid_data不参与校准
-    // 将local_valid_data保留为验证集
-    calibration_data = valid_data;
-    calibration_targets = valid_targets;
+    // CP训练数据 (30%-100%区间的global data)
+    ID_TYPE global_cp_start_idx = num_global_train_examples + num_global_valid_examples;
+    calibration_data = global_queries_.get().index({torch::indexing::Slice(global_cp_start_idx, global_data_size_)}).clone();
+    calibration_targets = torch::from_blob(global_lnn_distances_.data() + global_cp_start_idx,
+                                         num_global_cp_examples,
+                                         torch::TensorOptions().dtype(TORCH_VALUE_TYPE)).to(*device_);
     
-    // 确定全局验证样本数量，只使用这部分数据作为校准集
-    num_calib_examples = valid_targets.size(0);
+    // 确定校准样本数量
+    num_calib_examples = calibration_data.size(0);
     // printf("校准数据总量: %d\n", num_calib_examples);
     
     // 如果启用组合方法生成校准批次
@@ -1107,22 +1135,10 @@ RESPONSE dstree::Filter::batch_train(bool is_trial) {
     // 更新样本数量统计
     num_train_examples = train_data.size(0);
     num_valid_examples = calibration_data.size(0);
-    
     // 验证数据维度
     assert(train_data.size(0) == num_train_examples && train_targets.size(0) == num_train_examples);
     assert(calibration_data.size(0) == num_valid_examples && calibration_targets.size(0) == num_valid_examples);
     
-    // printf("训练集大小: %d, 验证集大小(本地): %d, 校准批次数(全局): %d\n", 
-          // num_train_examples, num_valid_examples, num_batches);
-    // 打印每个校准集的大小和总数统计
-    // ID_TYPE total_calib_size = 0;
-    // printf("\n校准集详细信息:\n");
-    // for (ID_TYPE i = 0; i < num_batches; ++i) {
-    //     ID_TYPE batch_size = calib_data_batches[i].size(0);
-    //     total_calib_size += batch_size;
-    //     // printf("校准集 %d: %d 个样本\n", i + 1, batch_size);
-    // }
-    // printf("校准集总数: %d 个\n校准集数量: %d 个\n", total_calib_size, num_batches);
   }
 
 
@@ -1152,19 +1168,7 @@ RESPONSE dstree::Filter::batch_train(bool is_trial) {
       *optimizer, initial_cooldown_epochs, optim::MIN, config_.get().filter_lr_adjust_factor_);
 
   torch::nn::MSELoss mse_loss(torch::nn::MSELossOptions().reduction(torch::kMean));
-    // 添加自定义非对称loss函数
-  // auto asymmetric_loss = [](const torch::Tensor& pred, const torch::Tensor& target, float overestimation_penalty = 5.0) {
-  //   // 计算预测误差
-  //   auto diff = pred - target;
-  //   // 创建掩码：overestimation (pred > target) → 1.0, underestimation → 0.0
-  //   auto overestimation_mask = (diff > 0).to(torch::kFloat32);
-  //   // 创建权重：高估时使用overestimation_penalty，低估时使用1.0
-  //   auto weights = 1.0 + (overestimation_penalty - 1.0) * overestimation_mask;
-  //   // 计算带权重的平方误差
-  //   auto squared_error = weights * diff * diff;
-  //   // 返回平均loss
-  //   return squared_error.mean();
-  // };
+
 
 #ifdef DEBUG
   std::vector<float> train_losses, valid_losses, batch_train_losses;
@@ -1172,100 +1176,6 @@ RESPONSE dstree::Filter::batch_train(bool is_trial) {
   batch_train_losses.reserve(num_train_examples / config_.get().filter_train_batchsize_ + 1);
   valid_losses.reserve(config_.get().filter_train_nepoch_);
 #endif
-
-  //================================= 9. 训练循环 ==============================
-  
-//   torch::Tensor batch_data, batch_target;
-//   for (ID_TYPE epoch = 0; epoch < config_.get().filter_train_nepoch_; ++epoch) {
-//     model_->train(); // 切换至训练模式
-   
-//     // 9.1 前向传播与反向传播
-//     for (auto &batch : *train_data_loader) {
-//       batch_data = batch.data;
-//       batch_target = batch.target;
-//       optimizer->zero_grad();
-//       torch::Tensor prediction = model_->forward(batch_data);
-
-//       original  torch::Tensor loss = mse_loss->forward(prediction, batch_target);
-//       // // QYL: 修改loss 使用新的asymmetric_loss 
-//       // torch::Tensor loss = asymmetric_loss(prediction, batch_target, 5.0);
-  
-
-//       loss.backward(); // 反向传播
-//       if (config_.get().filter_train_clip_grad_) {
-//         auto norm = torch::nn::utils::clip_grad_norm_(model_->parameters(),
-//                                                       config_.get().filter_train_clip_grad_max_norm_,
-//                                                       config_.get().filter_train_clip_grad_norm_type_);
-//       }
-//       optimizer->step();
-
-// #ifdef DEBUG
-//       batch_train_losses.push_back(loss.detach().item<float>());
-// #endif
-//     }
-
-// #ifdef DEBUG
-//     train_losses.push_back(std::accumulate(batch_train_losses.begin(), batch_train_losses.end(), 0.0) / static_cast<VALUE_TYPE>(batch_train_losses.size()));
-//     batch_train_losses.clear();
-// #endif
-
-//     // 9.2 验证阶段
-//     { // evaluate
-//       VALUE_TYPE valid_loss = 0;
-
-//       c10::InferenceMode guard;
-//       model_->eval();  // 切换至评估模式
-//       torch::Tensor prediction = model_->forward(valid_data);
-//       valid_loss = mse_loss->forward(prediction, valid_targets).detach().item<VALUE_TYPE>();
-//       // QYL: 修改loss 使用新的asymmetric_loss 
-//       // valid_loss = asymmetric_loss(prediction, valid_targets).detach().item<VALUE_TYPE>();
-
-// #ifdef DEBUG
-//       valid_losses.push_back(valid_loss);
-// #endif
-
-//     // // 2. QYL 添加额外的评估指标
-//     //   auto diff = prediction - valid_targets;
-//     //   auto overestimation = (diff > 0);
-//     //   // 计算高估率(%)
-//     //   float overestimation_rate = overestimation.to(torch::kFloat32).mean().item<float>() * 100;
-//     //   // 计算平均高估幅度
-//     //   float mean_overestimation = diff.masked_select(overestimation).mean().item<float>();
-//     //   // 打印评估指标
-//     //   spdlog::info("Epoch {}: valid_loss={:.4f}, overestimation_rate={:.2f}%, mean_overestimation={:.4f}",
-//     //               epoch, valid_loss, overestimation_rate, mean_overestimation);
-
-
-//        // original 记录最佳模型状态
-//       if (epoch > initial_cooldown_epochs) {
-//         if (best_validation_loss > valid_loss) {
-//           best_validation_loss = valid_loss;
-//           best_validation_epoch = epoch;
-
-//           for (const auto &pair : model_->named_parameters()) {
-//             best_model_state[pair.key()] = pair.value().clone();
-//           }
-//         }
-//       }
-//       // 学习率调整与早停策略
-//       upcite::optim::LR_RETURN_CODE return_code = lr_scheduler.check_step(valid_loss);
-//       if (return_code == upcite::optim::EARLY_STOP) {
-//         epoch = config_.get().filter_train_nepoch_;
-//       }
-//     }
-//   }
-
-// #ifdef DEBUG
-//   spdlog::debug("filter {:d} s{:d} {:s} tloss = {:s}",
-//                 id_, stream_id, model_setting_ref_.get().model_setting_str,
-//                 upcite::array2str(train_losses.data(), config_.get().filter_train_nepoch_));
-//   spdlog::debug("filter {:d} s{:d} {:s} vloss = {:s}",
-//                 id_, stream_id, model_setting_ref_.get().model_setting_str,
-//                 upcite::array2str(valid_losses.data(), config_.get().filter_train_nepoch_));
-// #endif
-
-// //   c10::InferenceMode guard;
-
 
 
   // original 训练循环
@@ -1362,16 +1272,31 @@ RESPONSE dstree::Filter::batch_train(bool is_trial) {
   
   // !!!!!!!!!!!!!!!!!!1  存储模型预测结果到global_pred_distances_
   global_pred_distances_.insert(global_pred_distances_.end(), predictions_array, predictions_array + global_data_size_);
- 
+  
+  
   // 打印 global_pred_distances_ 的 size
   // printf("Size of global_pred_distances_: %zu\n", global_pred_distances_.size());
-  #ifdef DEBUG
-  spdlog::info("filter {:d}{:s} s{:d} {:s} g_pred{:s} = {:s}",
-               id_, is_trial ? " (trial)" : "",
-               stream_id, model_setting_ref_.get().model_setting_str,
-               config_.get().filter_remove_square_ ? "" : "_sq",
-               upcite::array2str(predictions_array, global_data_size_));
-#endif
+
+  // 保存模型预测结果到txt文件
+  std::string results_dir = config_.get().results_path_;
+  if (!results_dir.empty() && !fs::exists(results_dir)) {
+    fs::create_directories(results_dir);
+  }
+  // 创建子文件夹 original_error_filters
+  std::string original_error_dir = results_dir + "/original_error_filters";
+  if (!fs::exists(original_error_dir)) {
+    fs::create_directories(original_error_dir);
+  }
+  ID_TYPE start_index = num_global_train_examples + num_global_valid_examples;
+  save_prediction_errors(original_error_dir + "/filter_" + std::to_string(id_) + "_train_CP_global_predict_errors.txt", start_index);
+  
+// #ifdef DEBUG
+//   spdlog::info("filter {:d}{:s} s{:d} {:s} g_pred{:s} = {:s}",
+//                id_, is_trial ? " (trial)" : "",
+//                stream_id, model_setting_ref_.get().model_setting_str,
+//                config_.get().filter_remove_square_ ? "" : "_sq",
+//                upcite::array2str(predictions_array, global_data_size_));
+// #endif
 
   // ========== 关键修改点 5: 多校准集保形预测 ==========
   if (config_.get().filter_is_conformal_) {
@@ -1977,128 +1902,94 @@ RESPONSE dstree::Filter::generate_calibration_batches(
     std::vector<torch::Tensor>& calib_data_batches,
     std::vector<torch::Tensor>& calib_target_batches,
     std::vector<std::vector<ID_TYPE>>& calib_query_ids) {
-    
-  // printf("使用增强组合方法生成校准批次（每次生成批次前重新打乱索引，突破组合数量限制）\n");
-  // 获取校准数据大小和配置参数
-  ID_TYPE num_calib_examples = calib_data.size(0);
-  ID_TYPE n_parts = config_.get().filter_conformal_n_parts_;
-  ID_TYPE k_parts = config_.get().filter_conformal_k_parts_;
-  // 验证参数
-  if (n_parts <= 0) {
-    printf("错误: n_parts必须大于0, 当前值: %d\n", n_parts);
-    return FAILURE;
-  }
-  if (k_parts <= 0 || k_parts > n_parts) {
-    printf("错误: k_parts必须大于0且不大于n_parts, 当前值: %d\n", k_parts);
-    return FAILURE;
-  }
-  // printf("校准数据总量: %d, 划分为%d份, 每个批次使用%d份\n", num_calib_examples, n_parts, k_parts);
+    // printf("============进入generate_calibration_batches函数============\n");
+    // =================== 自适应重复最小化抽样 ===================
+    ID_TYPE num_calib_examples = calib_data.size(0);
+    ID_TYPE num_batches = config_.get().filter_conformal_num_batches_;
+    ID_TYPE batch_size = config_.get().filter_conformal_batch_size_;
+    // printf("num_calib_examples: %ld, num_batches: %ld, batch_size: %ld\n", static_cast<long>(num_calib_examples), static_cast<long>(num_batches), static_cast<long>(batch_size));
+    if (num_calib_examples == 0 || num_batches == 0) {
+        printf("错误: 校准样本数量(%ld)或批次数(%ld)非法\n", static_cast<long>(num_calib_examples), static_cast<long>(num_batches));
+        return FAILURE;
+    }
 
-  // 每份的样本数量
-  ID_TYPE examples_per_part = num_calib_examples / n_parts;
-  ID_TYPE remainder = num_calib_examples % n_parts;
-  
-  if (examples_per_part == 0) {
-    printf("错误: 校准样本数量不足以分成%d份\n", n_parts);
-    return FAILURE;
-  }
-  
-  // 确定批次数量，不再受组合数限制
-  ID_TYPE num_batches = config_.get().filter_conformal_num_batches_;  
-  // 预分配批次存储空间
-  calib_data_batches.resize(num_batches);
-  calib_target_batches.resize(num_batches);
-  calib_query_ids.resize(num_batches);
-  
-  // 为随机数生成器初始化
-  std::random_device rd;
-  std::mt19937 g(rd());
+    // 1. 计算所有bacth需要的query数量
+    ID_TYPE total_needed = num_batches * batch_size;   // 可能大于 num_calib_examples，需要重复
 
-  // 原始索引，用于后续随机打乱
-  std::vector<ID_TYPE> indices(num_calib_examples);
-  for (ID_TYPE i = 0; i < num_calib_examples; ++i) {
-    indices[i] = i;
-  }
-  
-  for (ID_TYPE batch_idx = 0; batch_idx < num_batches; ++batch_idx) {
+    // 2. 计算每条样本的配额 (base_usage 或 base_usage+1)
+    ID_TYPE base_usage      = total_needed / num_calib_examples;  // 最少使用次数
+    ID_TYPE extra_usage_cnt = total_needed % num_calib_examples;  // 需要额外 +1 的样本数
+
+    std::vector<ID_TYPE> usage_quota(num_calib_examples, base_usage);
+
+    // 随机数生成器
+    std::random_device rd;
+    std::mt19937 g(rd());
+
+    // 将索引打乱后，前 extra_usage_cnt 条 +1
+    std::vector<ID_TYPE> indices(num_calib_examples);
+    std::iota(indices.begin(), indices.end(), 0);
     std::shuffle(indices.begin(), indices.end(), g);
-    // printf("\n===== 生成批次 %ld =====\n", batch_idx);
-    
-    // 计算每个部分的范围
-    std::vector<std::pair<ID_TYPE, ID_TYPE>> part_ranges(n_parts);
-    ID_TYPE start_idx = 0;
-    
-    for (ID_TYPE part_idx = 0; part_idx < n_parts; ++part_idx) {
-      // 为最后一个部分添加剩余样本
-      ID_TYPE extra = (part_idx == n_parts - 1) ? remainder : 0;
-      ID_TYPE end_idx = start_idx + examples_per_part + extra;
-      // 确保不超出索引范围
-      end_idx = std::min(end_idx, static_cast<ID_TYPE>(indices.size()));
-      part_ranges[part_idx] = {start_idx, end_idx};
-      
-      // spdlog::debug("部分 {} 索引范围 [{}, {}), 大小={}", 
-      //              part_idx, start_idx, end_idx, end_idx - start_idx);
-      start_idx = end_idx;
+    for (ID_TYPE i = 0; i < extra_usage_cnt; ++i) {
+        usage_quota[indices[i]]++;
     }
-    
-    // 随机选择k个部分
-    std::vector<ID_TYPE> selected_parts(n_parts);
-    for (ID_TYPE i = 0; i < n_parts; ++i) {
-      selected_parts[i] = i;
-    }
-    std::shuffle(selected_parts.begin(), selected_parts.end(), g);
-    selected_parts.resize(k_parts);
-    std::sort(selected_parts.begin(), selected_parts.end()); // 排序便于检查重复
-    
-    // std::string selected_parts_str = "选择的部分: ";
-    // for (ID_TYPE part_idx : selected_parts) {
-    //   selected_parts_str += std::to_string(part_idx) + " ";
-    // }
-    // spdlog::info(selected_parts_str);
-    
-    // 计算当前批次大小
-    ID_TYPE batch_size = 0;
-    for (ID_TYPE part_idx : selected_parts) {
-      batch_size += part_ranges[part_idx].second - part_ranges[part_idx].first;
-    }
-    
-    // 为当前批次分配内存
-    calib_data_batches[batch_idx] = torch::empty({batch_size, calib_data.size(1)}, calib_data.options());
-    calib_target_batches[batch_idx] = torch::empty(batch_size, calib_targets.options());
-    calib_query_ids[batch_idx].reserve(batch_size);
-    
-    // 填充当前批次数据
-    ID_TYPE batch_pos = 0;
-    for (ID_TYPE part_idx : selected_parts) {
-      ID_TYPE part_start = part_ranges[part_idx].first;
-      ID_TYPE part_end = part_ranges[part_idx].second;      
-      ID_TYPE samples_shown = 0;
-      for (ID_TYPE j = part_start; j < part_end; ++j) {
-        ID_TYPE idx = indices[j];
-        calib_data_batches[batch_idx][batch_pos] = calib_data[idx];
-        calib_target_batches[batch_idx][batch_pos] = calib_targets[idx];
-        
-        // 记录原始查询ID（假设校准数据是从num_global_train_examples开始的全局数据）
-        // ！！！！！bug：因为校准数据是从num_global_train_examples开始的全局数据，所以需要减去1
-        ID_TYPE original_query_id = num_global_train_examples + idx;
-        calib_query_ids[batch_idx].push_back(original_query_id);
 
-        // Debug: 打印关键映射信息
-        // spdlog::debug("[CalibGen] batch={} part={} local_j={} shuffled_idx={} -> orig_qid={}",
-        //       batch_idx, part_idx, j - part_start, idx, original_query_id);
-        batch_pos++;
-      }
-
+    // 3. 构造采样池 (长度 == total_needed)
+    //usage_quota[i] 记录第 i 条 query 要出现的次数（大多数 2 次，少数 3 次）。
+    std::vector<ID_TYPE> sampling_pool;
+    sampling_pool.reserve(total_needed);
+    for (ID_TYPE i = 0; i < num_calib_examples; ++i) {
+        for (ID_TYPE k = 0; k < usage_quota[i]; ++k) {
+            sampling_pool.push_back(i);
+        }
     }
-  }
-  
-  // 最终汇总
-  ID_TYPE total_batch_size = 0;
-  for (ID_TYPE i = 0; i < num_batches; ++i) {
-    total_batch_size += calib_data_batches[i].size(0);
-  }
-  // printf("成功生成 %d 个校准批次, 总样本数: %d \n", num_batches, total_batch_size);
-  return SUCCESS;
+    // 再次打乱，保证随机
+    std::shuffle(sampling_pool.begin(), sampling_pool.end(), g);
+    // printf("sampling_pool.size(): %ld\n", static_cast<long>(sampling_pool.size()));
+    //sampling_pool 就是一条"抽签池"——
+    //它按"这条 query 应该被抽几次"的配额，把 校准集里所有 query 的索引 id 复制进去，然后整体打乱。
+
+    // 4. 按批次取样
+    calib_data_batches.resize(num_batches);
+    calib_target_batches.resize(num_batches);
+    calib_query_ids.resize(num_batches);
+
+    for (ID_TYPE batch_idx = 0; batch_idx < num_batches; ++batch_idx) {
+        calib_data_batches[batch_idx]   = torch::empty({batch_size, calib_data.size(1)}, calib_data.options());
+        calib_target_batches[batch_idx] = torch::empty(batch_size, calib_targets.options());
+        calib_query_ids[batch_idx].reserve(batch_size);
+
+        for (ID_TYPE j = 0; j < batch_size; ++j) {
+            ID_TYPE pool_pos = batch_idx * batch_size + j;
+            ID_TYPE idx      = sampling_pool[pool_pos];
+
+            // 写入样本
+            calib_data_batches[batch_idx][j]   = calib_data[idx];
+            calib_target_batches[batch_idx][j] = calib_targets[idx];
+
+            // 计算原始全局 query ID 偏移
+            ID_TYPE global_cp_start_idx = global_data_size_ - num_calib_examples; // CP校准集在原始query中的起始位置
+            ID_TYPE original_query_id = global_cp_start_idx + idx;
+            // printf("original_query_id: %ld\n", static_cast<long>(original_query_id));
+            calib_query_ids[batch_idx].push_back(original_query_id);
+        }
+
+        // （可选）再次随机打乱当前批次内部顺序
+        std::vector<ID_TYPE> perm_vec(batch_size);
+        std::iota(perm_vec.begin(), perm_vec.end(), 0);
+        std::shuffle(perm_vec.begin(), perm_vec.end(), g);
+        torch::Tensor perm = torch::from_blob(perm_vec.data(), {static_cast<long>(batch_size)}, torch::TensorOptions().dtype(torch::kLong)).clone();
+        perm = perm.to(calib_data_batches[batch_idx].device());
+        calib_data_batches[batch_idx]   = calib_data_batches[batch_idx].index_select(0, perm);
+        calib_target_batches[batch_idx] = calib_target_batches[batch_idx].index_select(0, perm);
+        // 同步调整 query_ids 顺序
+        std::vector<ID_TYPE> tmp_ids = calib_query_ids[batch_idx];
+        for (ID_TYPE j = 0; j < batch_size; ++j) {
+            calib_query_ids[batch_idx][j] = tmp_ids[perm_vec[j]];
+        }
+    }
+
+    return SUCCESS;
 }
 
 
@@ -2552,3 +2443,56 @@ void dstree::Filter::debug_print_global_vectors() const {
 //     fprintf(stderr, "[WARN] Filter %d destructor unknown exception\n", static_cast<int>(id_));
 //   }
 // }
+
+// 保存预测误差并按误差绝对值降序排序到txt文件
+RESPONSE dstree::Filter::save_prediction_errors(const std::string& filepath, ID_TYPE start_index) {
+    // 确保预测距离和真实距离长度一致
+    if (global_pred_distances_.size() != global_lnn_distances_.size()) {
+        spdlog::error("[save_prediction_errors] pred and true size mismatch: pred={}, true={}",
+                      global_pred_distances_.size(), global_lnn_distances_.size());
+        return FAILURE;
+    }
+
+    ID_TYPE n = static_cast<ID_TYPE>(global_pred_distances_.size());
+    if (n == 0) {
+        spdlog::warn("[save_prediction_errors] no data to save");
+        return FAILURE;
+    }
+
+    // 计算误差并打包 (error, query_id)
+    std::vector<std::pair<VALUE_TYPE, ID_TYPE>> error_pairs;
+    std::vector<ERROR_TYPE> residuals;
+    error_pairs.reserve(n);
+    // RESPONSE return_code = conformal_predictor_->fit(batch_residuals);
+    for (ID_TYPE i = start_index; i < n; ++i) {
+        VALUE_TYPE err = global_pred_distances_[i] - global_lnn_distances_[i];
+        residuals.push_back(err);
+        error_pairs.emplace_back(err < 0 ? -err : err, i);
+    }
+    RESPONSE return_code = conformal_predictor_->fit(residuals);
+    if (return_code != SUCCESS) {
+        spdlog::error("!!!!![save_total_prediction_errors] fit failed");
+        printf("!!!!![save_total_prediction_errors] fit failed\n");
+        return FAILURE;
+    }
+
+    // 按误差降序排序
+    std::sort(error_pairs.begin(), error_pairs.end(),
+              [](const auto &a, const auto &b) {
+                  return a.first > b.first;
+              });
+
+    // 写入文件
+    std::ofstream fout(filepath);
+    if (!fout.is_open()) {
+        spdlog::error("[save_prediction_errors] cannot open file: {}", filepath);
+        return FAILURE;
+    }
+
+    for (const auto &p : error_pairs) {
+        fout << p.second << " " << p.first << "\n"; // query_id error_value
+    }
+    fout.close();
+    spdlog::info("[save_prediction_errors] saved {} errors to {}", n, filepath);
+    return SUCCESS;
+}

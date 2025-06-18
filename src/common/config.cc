@@ -22,6 +22,7 @@ namespace dstree = upcite::dstree;
 
 dstree::Config::Config(int argc, char *argv[]) :
     filter_conformal_num_batches_(1),
+    filter_conformal_batch_size_(10),
     filter_valid_ratio_(0.6),
     filter_conformal_n_parts_(10),
     filter_conformal_k_parts_(3),
@@ -158,6 +159,8 @@ dstree::Config::Config(int argc, char *argv[]) :
        "Query prediction error save path")
        //batch
       ("filter_conformal_num_batches", po::value<ID_TYPE>(&filter_conformal_num_batches_)->default_value(1),
+       "Number of calibration batches")
+      ("filter_conformal_batch_size", po::value<ID_TYPE>(&filter_conformal_batch_size_)->default_value(10),
        "Number of calibration batches")
       ("filter_valid_ratio", po::value<VALUE_TYPE>(&filter_valid_ratio_)->default_value(0.6),
        "Validation ratio for calibration")

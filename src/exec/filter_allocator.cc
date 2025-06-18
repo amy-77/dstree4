@@ -1443,9 +1443,9 @@ RESPONSE dstree::Allocator::simulate_full_search_for_recall(std::shared_ptr<dstr
         batch_validation_recalls_simulated_[batch_i].push_back(recall);
         
         // 添加调试信息：打印详细的计算过程
-        printf("  批次 %ld/%ld, 误差分位数 %ld/%ld: total_hit_count=%ld, batch_total_knn=%ld, 召回率=%.4f\n", 
-               batch_i + 1, num_batches, error_i + 1, num_error_quantiles, 
-               total_hit_count, batch_total_knn, recall);
+        // printf("  批次 %ld/%ld, 误差分位数 %ld/%ld: total_hit_count=%ld, batch_total_knn=%ld, 召回率=%.4f\n", 
+        //        batch_i + 1, num_batches, error_i + 1, num_error_quantiles, 
+        //        total_hit_count, batch_total_knn, recall);
         
         // 检查召回率是否超出合理范围
         if (recall > 1.0) {
@@ -1470,7 +1470,7 @@ RESPONSE dstree::Allocator::simulate_full_search_for_recall(std::shared_ptr<dstr
   node_id_to_index.clear();
   batch_query_ids.clear();
 
-  printf("完整搜索模拟完成\n");
+  // printf("完整搜索模拟完成\n");
   return SUCCESS;
 }
 
@@ -1632,6 +1632,10 @@ RESPONSE dstree::Allocator::save_recall_coverage_pairs(
         fs::create_directories(save_path);
       }
     }
+    std::string lgbm_raw_data_dir = save_path + "/lgbm_raw_data";
+    if (!fs::exists(lgbm_raw_data_dir)) {
+      fs::create_directories(lgbm_raw_data_dir);
+    }
     
     // 为每个过滤器分别保存一个CSV文件
     for (auto& filter_info : filter_infos_) {
@@ -1639,7 +1643,7 @@ RESPONSE dstree::Allocator::save_recall_coverage_pairs(
             ID_TYPE filter_id = filter_info.node_.get().get_id();
             auto& filter = filter_info.node_.get().get_filter().get();
             // 构造CSV文件名
-            std::string csv_filename = save_path + "/filter_" + std::to_string(filter_id) + "_raw_data.csv";
+            std::string csv_filename = lgbm_raw_data_dir + "/filter_" + std::to_string(filter_id) + "_raw_data.csv";
             // 打开CSV文件
             std::ofstream csv_file(csv_filename);
             if (!csv_file.is_open()) {
@@ -1759,13 +1763,13 @@ RESPONSE dstree::Allocator::calculate_recall_coverage_pairs() {
         }
       }     
       ERROR_TYPE coverage = static_cast<ERROR_TYPE>(satisfying_batches) / num_batches;
-      // printf("error_i=%ld, min_recall={:.3f}, coverage={:.3f}\n", error_i, min_recall, coverage);
       error_recall_cov_pairs[error_i].emplace_back(min_recall, coverage);
     }
-    // 对该误差分位数下的(recall, coverage)对按recall升序排列
-    std::sort(error_recall_cov_pairs[error_i].begin(), error_recall_cov_pairs[error_i].end(),[](const std::pair<ERROR_TYPE, ERROR_TYPE>& a, const std::pair<ERROR_TYPE, ERROR_TYPE>& b) {
-      return a.first < b.first;  // 按recall升序排列
-    });
+    // // 对该误差分位数下的(recall, coverage)对按recall升序排列
+    // std::sort(error_recall_cov_pairs[error_i].begin(), error_recall_cov_pairs[error_i].end(),[](const std::pair<ERROR_TYPE, ERROR_TYPE>& a, const std::pair<ERROR_TYPE, ERROR_TYPE>& b) {
+    //   return a.first < b.first;  // 按recall升序排列
+    // });
+
   }
   
   // 打印和保存error_recall_cov_pairs矩阵
@@ -1789,21 +1793,12 @@ RESPONSE dstree::Allocator::calculate_recall_coverage_pairs() {
   }
   
 
-  
   // 保存(recall, coverage)对到CSV文件
   save_recall_coverage_pairs(error_recall_cov_pairs);
   // 在for循环之前初始化变量用于计算平均alpha
   std::vector<VALUE_TYPE> all_filter_alphas;
   size_t valid_filter_count = 0;
   
-  // 创建一个目录来存放所有filter的数据
-  // std::string save_path = config_.get().save_path_;
-  // if (!save_path.empty()) {
-  //   namespace fs = boost::filesystem;
-  //   if (!fs::exists(save_path)) {
-  //     fs::create_directories(save_path);
-  //   }
-  // }
   std::string lgbm_data_dir = save_path + "/lgbm_data";
   namespace fs = boost::filesystem;
   if (!fs::exists(lgbm_data_dir)) {
@@ -1816,7 +1811,7 @@ RESPONSE dstree::Allocator::calculate_recall_coverage_pairs() {
     if (filter_info.node_.get().has_active_filter()) {
       auto& filter = filter_info.node_.get().get_filter().get();
       
-      printf("\n====================为节点 %ld 训练统一的二元回归模型===============\n", filter_info.node_.get().get_id());
+      // printf("\n====================为节点 %ld 训练统一的二元回归模型===============\n", filter_info.node_.get().get_id());
       spdlog::info("\n================为节点 {} 训练统一的二元回归模型=================\n", filter_info.node_.get().get_id());
       // 收集所有误差分位数下的所有(recall, coverage)对和对应的误差位置
       std::vector<ERROR_TYPE> all_recalls;
@@ -1824,88 +1819,71 @@ RESPONSE dstree::Allocator::calculate_recall_coverage_pairs() {
       std::vector<ID_TYPE> all_error_indices; // 仍然需要误差索引
       std::vector<ERROR_TYPE> all_errors;     // 新增：对应的实际误差值
       
-      // 存储唯一的(recall, coverage)对及其最大误差位置索引
-      std::unordered_map<std::string, ID_TYPE> unique_pairs_max_error;
+      // 存储唯一的(recall-coverage)对 及{max_error_i, best_batch_id}
+      std::unordered_map<std::string, std::pair<ID_TYPE, ID_TYPE>> unique_pairs_max_error; // 改为存储{max_error_i, best_batch_id}
       // 从所有误差分位数收集数据并去重
       for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
-        for (const auto& [recall, coverage] : error_recall_cov_pairs[error_i]) {
+        for (ID_TYPE batch_i = 0; batch_i < error_recall_cov_pairs[error_i].size(); ++batch_i) {
+          const auto& [recall, coverage] = error_recall_cov_pairs[error_i][batch_i];
           // 创建唯一键
           std::string key = fmt::format("{:.6f}_{:.6f}", recall, coverage);
           // 检查是否已存在该(recall, coverage)对
           auto it = unique_pairs_max_error.find(key);
           if (it != unique_pairs_max_error.end()) {
             // 如果存在且当前误差索引大于已保存的，则更新
-            if (error_i > it->second) {
-              it->second = error_i;
+            if (error_i > it->second.first) {
+              it->second = {error_i, batch_i};
+            } else if (error_i == it->second.first) {
+              // 如果误差索引相同，比较error值，取较大者
+              VALUE_TYPE current_error = filter.get_batch_abs_error_interval_by_pos(batch_i, error_i);
+              VALUE_TYPE existing_error = filter.get_batch_abs_error_interval_by_pos(it->second.second, error_i);
+              if (current_error > existing_error) {
+                it->second.second = batch_i;
+              }
             }
           } else {
             // 如果不存在，则添加
-            unique_pairs_max_error[key] = error_i;
+            unique_pairs_max_error[key] = {error_i, batch_i};
           }
         }
       }
       
-      // 只打印第一个filter的unique_pairs_max_error中最后剩下的recall，cov，误差分位数
-            // 保存最后一个处理的filter的unique_pairs_with_errors
-      // printf("========= 开始打印最后一个filter的unique_pairs_max_error=========");
-      // // if (&filter_info == &filter_infos_.back() || 
-      // //     std::distance(&filter_info, &filter_infos_.back()) == filter_infos_.size() - 1) {
-      // printf("\nfilter_id=%ld 去重后的(recall, coverage)对及其最大误差分位数:\n", filter_info.node_.get().get_id());
-      // printf("总共有 %zu 个唯一的(recall, coverage)对\n", unique_pairs_max_error.size());
-      // printf("所有结果:\n");
-      // printf("%-12s %-12s %-15s\n", "Recall", "Coverage", "Max_Error_Index");
-      // printf("%-12s %-12s %-15s\n", "--------", "--------", "---------------");
-      // for (const auto& [key, max_error_i] : unique_pairs_max_error) {
-      //   float recall, coverage;
-      //   sscanf(key.c_str(), "%f_%f", &recall, &coverage);
-      //   printf("%-12.6f %-12.6f %-15ld\n", recall, coverage, max_error_i);
-      // }
-      // printf("\n");
-      // }
-      
+
       // 使用唯一的(recall, coverage)对和它们的最大误差索引, 获取去重之后的(recall, coverage, error_value)对
       // printf("========= 利用unique_pairs_max_error开始生成all_recalls, all_coverages, all_error_indices, all_errors=========\n");
-      for (const auto& [key, max_error_i] : unique_pairs_max_error) {
+      for (const auto& [key, error_batch_pair] : unique_pairs_max_error) {
         // 从key中提取recall和coverage
         float recall, coverage;
         sscanf(key.c_str(), "%f_%f", &recall, &coverage);
+        ID_TYPE max_error_i = error_batch_pair.first;
+        ID_TYPE best_batch_i = error_batch_pair.second;
+        
         all_recalls.push_back(recall);
         all_coverages.push_back(coverage);
         all_error_indices.push_back(max_error_i);
-        auto* cp = filter.get_conformal_predictor();
-        // printf("recall: %f, coverage: %f, max_error_i: %zu\n", recall, coverage, max_error_i);
-        // 获取对应的误差值（从过滤器中）
+        
+        // 获取对应的误差值（从过滤器中的特定batch）
         if (auto* cp = filter.get_conformal_predictor(); cp != nullptr) {
-          VALUE_TYPE error_value = 0;
-          // 遍历所有batch，找到max_error_i位置的最大误差值
-          // 因为相同误差分位数下,所有的recall,cov对都使用同一个max_error_i
-          for (size_t batch = 0; batch < num_batches; ++batch) {
-            // printf("batch: %zu, max_error_i: %zu\n", batch, max_error_i);
-            VALUE_TYPE batch_error = filter.get_batch_abs_error_interval_by_pos(batch, max_error_i);
-            error_value = std::max(error_value, batch_error);
-          }
-          // printf("max_error_value: %f\n", error_value);
+          VALUE_TYPE error_value = filter.get_batch_abs_error_interval_by_pos(best_batch_i, max_error_i);
           all_errors.push_back(error_value);
         }
       }
 
-      printf("========= 开始生成unique_pairs_max_error.size(): %zu =========\n", unique_pairs_max_error.size());
+      // printf("========= 开始生成unique_pairs_max_error.size(): %zu =========\n", unique_pairs_max_error.size());
       std::vector<std::tuple<float, float, float>> unique_pairs_with_errors;
-      for (const auto& [key, max_error_i] : unique_pairs_max_error) {
+      for (const auto& [key, error_batch_pair] : unique_pairs_max_error) {
           float recall, coverage;
           sscanf(key.c_str(), "%f_%f", &recall, &coverage);
+          ID_TYPE max_error_i = error_batch_pair.first;
+          ID_TYPE best_batch_i = error_batch_pair.second;
+          
           // 获取对应的误差值
           float error_value = 0.0f;
           if (auto* cp = filter.get_conformal_predictor(); cp != nullptr) {
-              // 遍历所有batch，找到max_error_i位置的最大误差值
-              size_t batch_count = cp->get_batch_count();
-              for (size_t batch = 0; batch < batch_count; ++batch) {
-                  float batch_error = filter.get_batch_abs_error_interval_by_pos(batch, max_error_i);
-                  error_value = std::max(error_value, batch_error);
-              }
+              error_value = filter.get_batch_abs_error_interval_by_pos(best_batch_i, max_error_i);
           }
           unique_pairs_with_errors.emplace_back(recall, coverage, error_value);
-          // printf("recall: %f, coverage: %f, error_value: %f\n", recall, coverage, error_value);
+          // printf("recall: %f, coverage: %f, error_value: %f (from batch_%ld, error_i_%ld)\n", recall, coverage, error_value, best_batch_i, max_error_i);
       }
       // 按照召回率排序
       std::sort(unique_pairs_with_errors.begin(), unique_pairs_with_errors.end());
@@ -1992,33 +1970,7 @@ RESPONSE dstree::Allocator::calculate_recall_coverage_pairs() {
           // 此时eigen_spline_coeffs已包含模型系数，但实际上不需要使用它
           // 因为函数内部已将系数保存到regression_coeffs_成员变量
       }
-      // 使用训练好的模型进行预测和设置
-      // ERROR_TYPE target_recall = config_.get().filter_conformal_recall_;
-      // ERROR_TYPE target_coverage = config_.get().filter_conformal_coverage_;
-      // printf("使用目标值: recall=%.4f, coverage=%.4f\n", target_recall, target_coverage);
-      
-      // 只是为了观测不同recall和coverage下的alpha值
-      // for (double target_recall = 0.90; target_recall <= 1.0; target_recall += 0.05) {
-      //   for (double target_coverage = 0.90; target_coverage <= 1.0; target_coverage += 0.05) {
-      //     // 使用训练好的模型直接预测最合适的误差值
-      //     RESPONSE result = filter_info.node_.get().set_filter_abs_error_interval_by_recall_and_coverage(target_recall, target_coverage);
-      //     spdlog::info("设置结果: {} \n", (result == SUCCESS) ? "成功" : "失败");
-      //     VALUE_TYPE predicted_alpha = filter_info.node_.get().get_filter_abs_error_interval();
-      //   }
-      // }
-      // std::vector<std::pair<double, double>> key_points = {
-      //   {0.9, 0.9}, {0.9, 0.95}, {0.9, 0.99},
-      //   {0.95, 0.9}, {0.95, 0.95}, {0.95, 0.99},
-      //   {0.99, 0.9}, {0.99, 0.95}, {0.99, 0.99}
-      // };
-      // // 打印关键点的alpha值
-      // printf("\n==== 关键点alpha值 ====\n");
-      // for (const auto& [target_recall, target_coverage] : key_points) {
-      //   RESPONSE result = filter_info.node_.get().set_filter_abs_error_interval_by_recall_and_coverage(target_recall, target_coverage);
-      //   VALUE_TYPE predicted_alpha = filter_info.node_.get().get_filter_abs_error_interval();
-      //   // printf("节点 %ld 在 (R=%.2f, C=%.2f) 的alpha值: %.4f\n", filter_info.node_.get().get_id(), target_recall, target_coverage, predicted_alpha);
-      //   spdlog::info("节点 {} 在 (R={:.2f}, C={:.2f}) 的alpha值: {:.4f}", filter_info.node_.get().get_id(), target_recall, target_coverage, predicted_alpha);
-      // }
+
 
       // 使用训练好的模型进行预测和设置
       ERROR_TYPE target_recall = config_.get().filter_conformal_recall_;
@@ -2032,7 +1984,7 @@ RESPONSE dstree::Allocator::calculate_recall_coverage_pairs() {
           valid_filter_count++;
           spdlog::info("Filter {} 在 R={:.2f}, C={:.2f} 下的alpha值: {:.4f}", 
                   filter_info.node_.get().get_id(), target_recall, target_coverage, alpha);
-          printf("(Filter %ld 在 R=%.2f, C=%.2f, alpha=%.4f)\n", filter_info.node_.get().get_id(), target_recall, target_coverage, filter_info.node_.get().get_filter_abs_error_interval());  
+          // printf("(Filter %ld 在 R=%.2f, C=%.2f, alpha=%.4f)\n", filter_info.node_.get().get_id(), target_recall, target_coverage, filter_info.node_.get().get_filter_abs_error_interval());  
       }
       
       // // 保存最后一个处理的filter的unique_pairs_with_errors
@@ -2154,699 +2106,632 @@ RESPONSE dstree::Allocator::save_predicted_alphas(const std::string& filepath) {
 
 
 
-// // // 辅助函数：保存批次召回率结果到CSV文件
-// RESPONSE dstree::Allocator::save_batch_recall_results(
-//     const std::vector<std::vector<ID_TYPE>>& batch_query_ids,
-//     ID_TYPE num_batches,
-//     ID_TYPE num_error_quantiles,
-//     const std::unordered_map<ID_TYPE, std::unordered_map<ID_TYPE, ID_TYPE>>& query_knn_nodes) {
-  
-//   // 定义结果保存路径
-//   const std::string results_dir = config_.get().save_path_;
 
-//   // 确保目录存在
-//   if (!results_dir.empty()) {
-//     namespace fs = boost::filesystem;
-//     if (!fs::exists(results_dir)) {
-//       printf("创建结果保存目录: %s\n", results_dir.c_str());
-//       if (!fs::create_directories(results_dir)) {
-//         printf("错误: 无法创建结果目录 %s\n", results_dir.c_str());
-//         return FAILURE;
-//       }
-//     }
-//   }
+// 模拟完整dstree搜索过程，重新计算准确的recall
+RESPONSE dstree::Allocator::simulate_full_search_for_recall_alpha_based(std::shared_ptr<dstree::Node> root) {
+  printf("\n ------Allocator::simulate_full_search_for_recall_alpha_based ------ \n");
   
-//   // 获取K值和节点映射
-//   const ID_TYPE K = config_.get().n_nearest_neighbor_; 
-//   std::unordered_map<ID_TYPE, size_t> node_id_to_index;
-//   for (size_t i = 0; i < filter_infos_.size(); ++i) {
-//     node_id_to_index[filter_infos_[i].node_.get().get_id()] = i;
-//   }
+  // 1. 从Node ID快速找到对应的Filter index， Filter Index = 该Filter在filter_infos_数组中的位置， Filter ID = Node ID（它们是同一个值）
+  std::unordered_map<ID_TYPE, size_t> node_id_to_index;
+  for (size_t i = 0; i < filter_infos_.size(); ++i) {
+    node_id_to_index[filter_infos_[i].node_.get().get_id()] = i;
+  }
+  printf("总共有 %zu 个filter\n", filter_infos_.size());
+  spdlog::info("总共有 {} 个filter", filter_infos_.size());
+  const ID_TYPE K = config_.get().n_nearest_neighbor_; 
   
-//   // 1. 为批次平均召回率创建CSV文件
-//   std::string batch_avg_file_path = results_dir + "/batch_avg_recalls.csv";
-//   std::ofstream batch_avg_recall_file(batch_avg_file_path);
-//   if (!batch_avg_recall_file.is_open()) {
-//     printf("错误: 无法创建批次平均召回率文件 %s\n", batch_avg_file_path.c_str());
-//     return FAILURE;
-//   }
+  // 2. 获取校准集批次信息
+  ID_TYPE num_batches = 0;
+  ID_TYPE examples_per_batch = 0;
+  std::vector<std::vector<ID_TYPE>> batch_query_ids;
+  
+  bool found_calibration_info = false;
+  for (size_t i = 0; i < filter_infos_.size() && !found_calibration_info; ++i) {
+    auto& filter_info = filter_infos_[i];
+    if (filter_info.node_.get().has_active_filter()) {
+      auto& filter = filter_info.node_.get().get_filter().get();
+      if (!filter.get_batch_calib_query_ids().empty()) {
+        batch_query_ids = filter.get_batch_calib_query_ids();
+        num_batches = batch_query_ids.size();
+        examples_per_batch = batch_query_ids[0].size();
+        found_calibration_info = true;
+        printf("获取校准批次信息: %ld 批次, 每批 %ld 样本\n", num_batches, examples_per_batch);
+      }
+    }
+  }
+  
+  if (!found_calibration_info) {
+    printf("错误: 未找到校准批次信息\n");
+    return FAILURE;
+  }
+  
+  ID_TYPE num_error_quantiles = filter_infos_[0].node_.get().get_alphas_size();
+  printf("误差分位数数量: %ld\n", num_error_quantiles);
+  
+  // 添加调试信息：打印关键配置参数
+  printf("关键配置参数:\n");
+  printf("  K (最近邻数量): %ld\n", K);
+  printf("  批次数量: %ld\n", num_batches);
+  printf("  每批样本数: %ld\n", examples_per_batch);
+  printf("  叶子节点总数: %zu\n", filter_infos_.size());
+  printf("  每批总KNN数 (K * batch_size): %ld\n", K * examples_per_batch);
 
-//   // 设置输出精度
-//   batch_avg_recall_file << std::fixed << std::setprecision(5);
+  if (!is_recall_calculated_) { // 初始为false，执行内部代码
 
-//   // 写入表头
-//   batch_avg_recall_file << "batch_id";
-//   for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
-//     batch_avg_recall_file << ",error_" << error_i;
-//   }
-//   batch_avg_recall_file << std::endl;
-
-//   // 写入每个批次的平均召回率
-//   for (ID_TYPE batch_i = 0; batch_i < num_batches; ++batch_i) {
-//     batch_avg_recall_file << batch_i;
-//     for (ID_TYPE error_i = 0; error_i < batch_validation_recalls_[batch_i].size(); ++error_i) {
-//       batch_avg_recall_file << "," << batch_validation_recalls_[batch_i][error_i];
-//     }
-//     batch_avg_recall_file << std::endl;
-//   }
-//   batch_avg_recall_file.close();
-
-//   // 为批次平均错误减枝率和无过滤器率创建新的CSV文件
-//   std::string pruning_stats_path = results_dir + "/batch_pruning_stats.csv";
-//   std::ofstream pruning_stats_file(pruning_stats_path);
-//   if (!pruning_stats_file.is_open()) {
-//     printf("错误: 无法创建批次减枝统计文件 %s\n", pruning_stats_path.c_str());
-//     return FAILURE;
-//   }
-  
-//   // 设置输出精度
-//   pruning_stats_file << std::fixed << std::setprecision(5);
-  
-//   // 写入表头
-//   pruning_stats_file << "batch_id,error_quantile,avg_wrong_pruned_ratio,avg_no_filter_ratio,total_nodes_count" << std::endl;
-  
-//   // 计算和写入每个批次在每个误差分位数下的平均错误减枝率和无过滤器率
-//     for (ID_TYPE batch_i = 0; batch_i < num_batches; ++batch_i) {
-//     const std::vector<ID_TYPE>& current_batch_query_ids = batch_query_ids[batch_i];
-//     ID_TYPE batch_size = current_batch_query_ids.size();
+    // 3. 重新初始化召回率存储结构
+    batch_validation_recalls_simulated_.clear();
+    batch_validation_recalls_simulated_.resize(num_batches);
     
-//     for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
-//       // 统计变量
-//       ID_TYPE total_nodes = 0;
-//       ID_TYPE total_wrong_pruned = 0;
-//       ID_TYPE total_no_filter = 0;
+    // 4. 外层循环: 遍历误差分位数
+    for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
+      // printf("处理误差分位数 %ld/%ld\n", error_i + 1, num_error_quantiles);
       
-//       // 遍历当前批次的所有查询
-//       for (ID_TYPE query_idx = 0; query_idx < batch_size; ++query_idx) {
-//         ID_TYPE current_query_id = current_batch_query_ids[query_idx];
+      // 5. 中层循环: 遍历校准集批次
+      for (ID_TYPE batch_i = 0; batch_i < num_batches; ++batch_i) {
+        const std::vector<ID_TYPE>& current_batch_query_ids = batch_query_ids[batch_i];
+        ID_TYPE batch_size = current_batch_query_ids.size();
+        ID_TYPE total_hit_count = 0;
+        const ID_TYPE batch_total_knn = K * batch_size;
         
-//         // 获取knn_nodes信息
-//         auto it = query_knn_nodes.find(current_query_id);
-//         if (it == query_knn_nodes.end()) continue;
+        // 6. 内层循环: 遍历当前批次的每个查询
+        for (ID_TYPE query_idx = 0; query_idx < batch_size; ++query_idx) {
+          ID_TYPE current_query_id = current_batch_query_ids[query_idx] - 1;
+          
+          // 7. 模拟完整的dstree搜索过程
+          ID_TYPE hit_count = simulate_dstree_search_alpha_based_for_query(
+              current_query_id, batch_i, error_i, node_id_to_index, root);
+          
+          total_hit_count += hit_count;
+        }
         
-//         const auto& node_counts = it->second;
+        // 计算当前批次、当前误差分位数下的召回率
+        ERROR_TYPE recall = static_cast<ERROR_TYPE>(total_hit_count) / batch_total_knn;
+        batch_validation_recalls_simulated_[batch_i].push_back(recall);
         
-//         // 遍历查询的所有相关节点
-//         for (const auto& [node_id, count_in_node] : node_counts) {
-//           auto map_it = node_id_to_index.find(node_id);
-//           if (map_it == node_id_to_index.end()) continue;
-          
-//           size_t node_index = map_it->second;
-//           if (node_index >= filter_infos_.size()) continue;
-          
-//           auto& filter_info = filter_infos_[node_index];
-//           auto& target_node = filter_info.node_;
-          
-//           // 每个节点计数为1（统计节点数量而非K近邻数量）
-//           total_nodes++;
-          
-//           if (target_node.get().has_active_filter()) {
-//             VALUE_TYPE abs_error = target_node.get().get_filter_batch_abs_error_interval_by_pos(batch_i, error_i);
-//             VALUE_TYPE bsf_distance = target_node.get().get_filter_bsf_distance(current_query_id);
-//             VALUE_TYPE pred_distance = target_node.get().get_filter_pred_distance(current_query_id);
-            
-//             if (pred_distance - abs_error > bsf_distance) {
-//               // 错误减枝
-//               total_wrong_pruned++;
-//             }
-//           } else {
-//             // 无过滤器
-//             total_no_filter++;
-//           }
-//         }
-//       }
+        // 添加调试信息：打印详细的计算过程
+        // printf("  批次 %ld/%ld, 误差分位数 %ld/%ld: total_hit_count=%ld, batch_total_knn=%ld, 召回率=%.4f\n", 
+        //        batch_i + 1, num_batches, error_i + 1, num_error_quantiles, 
+        //        total_hit_count, batch_total_knn, recall);
+        
+        // 检查召回率是否超出合理范围
+        if (recall > 1.0) {
+          printf("警告: 召回率 %.4f 超过1.0，可能存在计算错误!\n", recall);
+          printf("       total_hit_count=%ld, batch_total_knn=%ld\n", total_hit_count, batch_total_knn);
+        }
+        
+        // 打印进度信息
+        // if (batch_i % 10 == 0) {
+        //   // printf("  批次 %ld/%ld, 召回率: %.4f\n", batch_i + 1, num_batches, recall);
+        // }
+      }
+    }
+
+    if (calculate_alpha_based_recall_coverage_pairs() != SUCCESS) {
+        printf("警告: 计算(recall, coverage)对失败\n");
+    }
+    is_recall_calculated_ = true;
+    
+  }
+    // 安全释放临时变量，避免析构时的问题
+  node_id_to_index.clear();
+  batch_query_ids.clear();
+
+  printf("完整搜索模拟完成\n");
+  return SUCCESS;
+}
+
+
+
+// 模拟单个查询的dstree搜索过程
+ID_TYPE dstree::Allocator::simulate_dstree_search_alpha_based_for_query(
+    ID_TYPE query_id, 
+    ID_TYPE batch_i, 
+    ID_TYPE error_i,
+    const std::unordered_map<ID_TYPE, size_t>& node_id_to_index,
+    std::shared_ptr<dstree::Node> root) {
+  
+  ID_TYPE hit_count = 0;
+  VALUE_TYPE current_bsf = constant::MAX_VALUE;  // 初始化为最大值
+  ID_TYPE total_leaf_nodes = 0;  // 统计访问的叶子节点总数
+  
+  // 添加调试信息（仅为第一个查询打印，避免输出过多）
+  bool debug_print = (query_id == 0 && batch_i == 0 && error_i == 0);
+  if (debug_print) {
+    printf("\n=== 调试: simulate_dstree_search_for_query ===\n");
+    printf("查询ID: %ld, 批次: %ld, 误差分位数: %ld\n", query_id, batch_i, error_i);
+  }
+  
+  // 第一步：找到当前查询的target_node（k=1情况下就是最近的那个节点）
+  const ID_TYPE K = config_.get().n_nearest_neighbor_;
+  ID_TYPE target_node_id = -1;
+  VALUE_TYPE min_distance = constant::MAX_VALUE;
+  
+  // 遍历所有叶子节点，找到距离最近的那个作为target_node
+  for (size_t filter_idx = 0; filter_idx < filter_infos_.size(); ++filter_idx) {
+    auto& filter_info = filter_infos_[filter_idx];
+    auto& node = filter_info.node_;
+    
+    if (node.get().is_leaf()) {
+      VALUE_TYPE true_distance = node.get().get_filter_nn_distance(query_id);
+      if (true_distance < min_distance) {
+        min_distance = true_distance;
+        target_node_id = node.get().get_id();
+      }
+    }
+  }
+  
+  if (debug_print) {
+    printf("查询 %ld 的target_node_id: %ld, 真实距离: %.6f\n", query_id, target_node_id, min_distance);
+  }
+  
+  // 第二步：模拟真实的dstree搜索过程，访问所有叶子节点来正确计算BSF
+  std::priority_queue<NODE_DISTNCE, std::vector<NODE_DISTNCE>, CompareDecrNodeDist> local_leaf_min_heap;
+  local_leaf_min_heap.push(std::make_tuple(std::ref(*root), 0));
+  
+  // 按真实访问顺序遍历所有叶子节点
+  while (!local_leaf_min_heap.empty()) {
+    auto [node_to_visit, node2visit_lbdistance] = local_leaf_min_heap.top();
+    local_leaf_min_heap.pop();
+    
+    if (node_to_visit.get().is_leaf()) {
+      // 处理叶子节点
+      ID_TYPE node_id = node_to_visit.get().get_id();
+      auto map_it = node_id_to_index.find(node_id);
       
-//       // 计算平均比率
-//       float avg_wrong_pruned_ratio = total_nodes > 0 ? 
-//           static_cast<float>(total_wrong_pruned) / total_nodes : 0.0f;
-//       float avg_no_filter_ratio = total_nodes > 0 ? 
-//           static_cast<float>(total_no_filter) / total_nodes : 0.0f;
+      if (map_it == node_id_to_index.end()) {
+        continue;
+      }
       
-//       // 写入统计结果
-//       pruning_stats_file << batch_i << "," << error_i << ","
-//                         << avg_wrong_pruned_ratio << "," 
-//                         << avg_no_filter_ratio << ","
-//                         << total_nodes << std::endl;
-//     }
-//   }
-  
-//   pruning_stats_file.close();
-//   // printf("已保存批次减枝统计数据到 %s\n", pruning_stats_path.c_str());
-
-//   // 2. 为每个批次创建单独的查询召回率文件
-//       for (ID_TYPE batch_i = 0; batch_i < num_batches; ++batch_i) {
-//     std::string filename = results_dir + "/batch_" + std::to_string(batch_i) + "_query_recalls.csv";
-//     std::ofstream query_file(filename);
-//     if (!query_file.is_open()) {
-//       printf("警告: 无法创建批次 %ld 的查询召回率文件 %s\n", batch_i, filename.c_str());
-//       continue;
-//     }
-    
-//     // 设置输出精度
-//     query_file << std::fixed << std::setprecision(5);
-    
-//     // 写入表头
-//     query_file << "query_idx,original_query_id";
-//     for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
-//       query_file << ",error_" << error_i;
-//     }
-//     query_file << std::endl;
-    
-//     // 获取当前批次的查询ID
-//     const std::vector<ID_TYPE>& current_batch_query_ids = batch_query_ids[batch_i];
-//     ID_TYPE batch_size = current_batch_query_ids.size();
-    
-//     // 遍历每个查询，计算并写入其召回率
-//     for (ID_TYPE query_idx = 0; query_idx < batch_size; ++query_idx) {
-//       ID_TYPE current_query_id = current_batch_query_ids[query_idx];
-//       query_file << query_idx << "," << current_query_id;
+      size_t node_index = map_it->second;
+      if (node_index >= filter_infos_.size()) {
+        continue;
+      }
       
-//       // 遍历每个误差分位数
-//       for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
-//         // 获取knn_nodes信息
-//           auto it = query_knn_nodes.find(current_query_id);
-//           if (it == query_knn_nodes.end()) {
-//           query_file << ",0.00000"; // 查询不存在，设置为0
-//             continue;
-//           }
-        
-//         // 计算当前查询在当前误差分位数下的召回率
-//           const auto& node_counts = it->second;
-//           ID_TYPE hit_count = 0;
-        
-//         // 遍历查询的所有相关节点
-//           for (const auto& [node_id, count_in_node] : node_counts) {
-//             auto map_it = node_id_to_index.find(node_id);
-//           if (map_it == node_id_to_index.end()) continue;
-          
-//             size_t node_index = map_it->second;
-//           if (node_index >= filter_infos_.size()) continue;
-            
-//             auto& filter_info = filter_infos_[node_index];
-//             auto& target_node = filter_info.node_;
-            
-//             if (target_node.get().has_active_filter()) {
-//             VALUE_TYPE abs_error = target_node.get().get_filter_batch_abs_error_interval_by_pos(batch_i, error_i);
-//               VALUE_TYPE bsf_distance = target_node.get().get_filter_bsf_distance(current_query_id);
-//               VALUE_TYPE pred_distance = target_node.get().get_filter_pred_distance(current_query_id);
-            
-//               if (pred_distance - abs_error <= bsf_distance) {
-//               hit_count += count_in_node;
-//             }else{
-//               // 当前query在当前batch_i下，当前error_i下被错误减枝 
-//               }
-//             } else {
-//             hit_count += count_in_node;
-//             // 当前query在当前batch_i下，当前error_i下没有使用filter，完全访问真实knn_nodes，所以全部命中
-//           }
-//         }
-        
-//         // 计算并写入召回率
-//         float query_recall = static_cast<float>(hit_count) / K;
-//         query_file << "," << query_recall;
-//       }
-//       query_file << std::endl;
-//     }
-//     query_file.close();
-//   }
-
-//   // printf("已保存批次平均召回率到 %s\n", batch_avg_file_path.c_str());
-//   // printf("已保存各批次查询召回率到 %s/batch_X_query_recalls.csv 文件\n", results_dir.c_str());
-  
-//   return SUCCESS;
-// }
-
-
-
-// // 新增：保存带批次召回率的置信区间计算函数
-// RESPONSE dstree::Allocator::set_batch_confidence_from_recall_save(const std::unordered_map<ID_TYPE, std::unordered_map<ID_TYPE, ID_TYPE>>& query_knn_nodes) {
-//   printf("\n ------Allocator::set_batch_confidence_from_recall_save ------ \n");
-  
-//   // 首先执行标准的批次置信区间计算
-//   RESPONSE result = set_batch_confidence_from_recall(query_knn_nodes);
-//   if (result == FAILURE) {
-//     printf("错误: 执行 set_batch_confidence_from_recall 失败，无法保存结果\n");
-//     return FAILURE;
-//   }
-  
-//   // 查询校准集批次信息
-//   ID_TYPE num_batches = 0;
-//   ID_TYPE examples_per_batch = 0;
-//   std::vector<std::vector<ID_TYPE>> batch_query_ids;
-//   bool found_calibration_info = false;
-  
-//   // 从任意一个有效过滤器中获取校准批次信息
-//   for (size_t i = 0; i < filter_infos_.size() && !found_calibration_info; ++i) {
-//     auto& filter_info = filter_infos_[i];
-//     if (filter_info.node_.get().has_active_filter()) {
-//       auto& filter = filter_info.node_.get().get_filter().get();
-
-//       if (!filter.get_batch_calib_query_ids().empty()) {
-//         batch_query_ids = filter.get_batch_calib_query_ids();
-//         num_batches = batch_query_ids.size();
-//         examples_per_batch = batch_query_ids[0].size();
-//         found_calibration_info = true;
-
-//         printf("从节点 %ld 获取到校准批次信息: %ld 批次, 每批约 %ld 样本\n", 
-//                filter_info.node_.get().get_id(), num_batches, examples_per_batch);
-//       }
-//     }
-//   }
-  
-//   if (!found_calibration_info) {
-//     printf("错误: 未找到任何有效的校准批次信息，无法保存结果\n");
-//     return FAILURE;
-//   }
-  
-//   // 确定误差分位数的数量
-//   ID_TYPE num_error_quantiles = examples_per_batch + 2; // 加2是为了添加哨兵值
-//   printf("误差分位数数量: %ld\n", num_error_quantiles);
-  
-//   // 保存召回率结果到文件
-//   // RESPONSE recall_result = save_batch_recall_results(batch_query_ids, num_batches, num_error_quantiles, query_knn_nodes);
-
-//   // 保存节点访问统计结果到文件
-//   // RESPONSE access_result = save_node_access_stats(batch_query_ids, num_batches, num_error_quantiles, query_knn_nodes);
-  
-//   return (recall_result == SUCCESS && access_result == SUCCESS) ? SUCCESS : FAILURE;
-// }
-
-
-
-
-// // 新增：保存节点访问和减枝统计数据的方法实现
-// RESPONSE dstree::Allocator::save_node_access_stats(
-//     const std::vector<std::vector<ID_TYPE>>& batch_query_ids,
-//     ID_TYPE num_batches,
-//     ID_TYPE num_error_quantiles,
-//     const std::unordered_map<ID_TYPE, std::unordered_map<ID_TYPE, ID_TYPE>>& query_knn_nodes) {
-    
-//   // 定义结果保存路径
-//   const std::string results_dir = config_.get().save_path_;
-
-//   // 确保目录存在
-//   if (!results_dir.empty()) {
-//     if (!fs::exists(results_dir)) {
-//       printf("创建结果保存目录: %s\n", results_dir.c_str());
-//       if (!fs::create_directories(results_dir)) {
-//         printf("错误: 无法创建结果目录 %s\n", results_dir.c_str());
-//         return FAILURE;
-//       }
-//     }
-//   }
-  
-//   // 获取节点映射
-//   std::unordered_map<ID_TYPE, size_t> node_id_to_index;
-//   for (size_t i = 0; i < filter_infos_.size(); ++i) {
-//     node_id_to_index[filter_infos_[i].node_.get().get_id()] = i;
-//   }
-  
-//   // 创建访问统计文件
-//   std::string access_stats_file_path = results_dir + "/node_access_stats.csv";
-//   std::ofstream access_stats_file(access_stats_file_path);
-//   if (!access_stats_file.is_open()) {
-//     printf("错误: 无法创建节点访问统计文件 %s\n", access_stats_file_path.c_str());
-//     return FAILURE;
-//   }
-  
-//   // 写入表头
-//   access_stats_file << "batch_id,error_quantile,query_id,fully_accessed_ratio,wrong_pruned_ratio,total_node_count" << std::endl;
-  
-//   // 遍历批次、误差分位数和查询
-//     for (ID_TYPE batch_i = 0; batch_i < num_batches; ++batch_i) {
-//     const std::vector<ID_TYPE>& current_batch_query_ids = batch_query_ids[batch_i];
-//     ID_TYPE batch_size = current_batch_query_ids.size();
-    
-//       for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
-//       for (ID_TYPE query_idx = 0; query_idx < batch_size; ++query_idx) {
-//         ID_TYPE current_query_id = current_batch_query_ids[query_idx];
-        
-//         // 获取当前查询的节点分布
-//         auto it = query_knn_nodes.find(current_query_id);
-//         if (it == query_knn_nodes.end()) continue;
-        
-//         const auto& node_counts = it->second;
-//         ID_TYPE total_nodes = 0;           // 总节点数
-//         ID_TYPE fully_accessed_count = 0;  // 完全访问的节点数
-//         ID_TYPE wrong_pruned_count = 0;    // 被错误减枝的节点数
-        
-//         // 遍历查询相关的所有节点
-//         for (const auto& [node_id, count_in_node] : node_counts) {
-//           auto map_it = node_id_to_index.find(node_id);
-//           if (map_it == node_id_to_index.end()) continue;
-          
-//           size_t node_index = map_it->second;
-//           if (node_index >= filter_infos_.size()) continue;
-          
-//           auto& filter_info = filter_infos_[node_index];
-//           auto& target_node = filter_info.node_;
-          
-//           // 统计总节点数
-//           total_nodes += count_in_node;
-          
-//           if (target_node.get().has_active_filter()) {
-//             VALUE_TYPE abs_error = target_node.get().get_filter_batch_abs_error_interval_by_pos(batch_i, error_i);
-//             VALUE_TYPE bsf_distance = target_node.get().get_filter_bsf_distance(current_query_id);
-//             VALUE_TYPE pred_distance = target_node.get().get_filter_pred_distance(current_query_id);
-            
-//             if (pred_distance - abs_error <= bsf_distance) {
-//               // 正确访问
-//               fully_accessed_count += count_in_node;
-//             } else {
-//               // 错误减枝
-//               wrong_pruned_count += count_in_node;
-//             }
-//           } else {
-//             // 无过滤器，完全访问
-//             fully_accessed_count += count_in_node;
-//           }
-//         }
-        
-//         // 计算比例
-//         float fully_accessed_ratio = total_nodes > 0 ? 
-//             static_cast<float>(fully_accessed_count) / total_nodes : 0.0f;
-//         float wrong_pruned_ratio = total_nodes > 0 ? 
-//             static_cast<float>(wrong_pruned_count) / total_nodes : 0.0f;
-        
-//         // 写入统计结果
-//         access_stats_file << batch_i << "," << error_i << "," << current_query_id << ","
-//                          << std::fixed << std::setprecision(5) << fully_accessed_ratio << ","
-//                          << wrong_pruned_ratio << "," << total_nodes << std::endl;
-//       }
-//     }
-//   }
-  
-//   access_stats_file.close();
-//   printf("已保存节点访问统计数据到 %s\n", access_stats_file_path.c_str());
-  
-//   // 创建批次汇总统计文件
-//   std::string batch_summary_path = results_dir + "/batch_access_summary.csv";
-//   std::ofstream batch_summary_file(batch_summary_path);
-//   if (!batch_summary_file.is_open()) {
-//     printf("错误: 无法创建批次访问汇总文件 %s\n", batch_summary_path.c_str());
-//     return FAILURE;
-//   }
-  
-//   // 写入表头
-//   batch_summary_file << "batch_id,error_quantile,avg_fully_accessed_ratio,avg_wrong_pruned_ratio" << std::endl;
-  
-//   // 计算每个批次在每个误差分位数下的平均访问统计
-//   for (ID_TYPE batch_i = 0; batch_i < num_batches; ++batch_i) {
-//     const std::vector<ID_TYPE>& current_batch_query_ids = batch_query_ids[batch_i];
-//     ID_TYPE batch_size = current_batch_query_ids.size();
-    
-//     for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
-//       float sum_fully_accessed_ratio = 0.0f;
-//       float sum_wrong_pruned_ratio = 0.0f;
-//       ID_TYPE valid_query_count = 0;
+      auto& filter_info = filter_infos_[node_index];
+      auto& current_node = filter_info.node_;
       
-//       for (ID_TYPE query_idx = 0; query_idx < batch_size; ++query_idx) {
-//         ID_TYPE current_query_id = current_batch_query_ids[query_idx];
-        
-//         // 获取当前查询的节点分布
-//         auto it = query_knn_nodes.find(current_query_id);
-//         if (it == query_knn_nodes.end()) continue;
-        
-//         const auto& node_counts = it->second;
-//         ID_TYPE total_nodes = 0;
-//         ID_TYPE fully_accessed_count = 0;
-//         ID_TYPE wrong_pruned_count = 0;
-        
-//         // 遍历查询相关的所有节点
-//         for (const auto& [node_id, count_in_node] : node_counts) {
-//           auto map_it = node_id_to_index.find(node_id);
-//           if (map_it == node_id_to_index.end()) continue;
-          
-//           size_t node_index = map_it->second;
-//           if (node_index >= filter_infos_.size()) continue;
-          
-//           auto& filter_info = filter_infos_[node_index];
-//           auto& target_node = filter_info.node_;
-          
-//           // 统计总节点数
-//           total_nodes += count_in_node;
-          
-//           if (target_node.get().has_active_filter()) {
-//             VALUE_TYPE abs_error = target_node.get().get_filter_batch_abs_error_interval_by_pos(batch_i, error_i);
-//             VALUE_TYPE bsf_distance = target_node.get().get_filter_bsf_distance(current_query_id);
-//             VALUE_TYPE pred_distance = target_node.get().get_filter_pred_distance(current_query_id);
-            
-//             if (pred_distance - abs_error <= bsf_distance) {
-//               // 正确访问
-//               fully_accessed_count += count_in_node;
-//             } else {
-//               // 错误减枝
-//               wrong_pruned_count += count_in_node;
-//             }
-//     } else {
-//             // 无过滤器，完全访问
-//             fully_accessed_count += count_in_node;
-//           }
-//         }
-        
-//         if (total_nodes > 0) {
-//           sum_fully_accessed_ratio += static_cast<float>(fully_accessed_count) / node_counts.size();
-//           sum_wrong_pruned_ratio += static_cast<float>(wrong_pruned_count) / node_counts.size();
-//           valid_query_count++;
-//         }
-//       }
+      // 获取当前节点的真实距离
+      VALUE_TYPE true_distance = current_node.get().get_filter_nn_distance(query_id);
       
-//       // 计算当前批次当前误差分位数下的平均比例
-//       float avg_fully_accessed_ratio = valid_query_count > 0 ? 
-//           sum_fully_accessed_ratio / valid_query_count : 0.0f;
-//       float avg_wrong_pruned_ratio = valid_query_count > 0 ? 
-//           sum_wrong_pruned_ratio / valid_query_count : 0.0f;
+      // 更新BSF（模拟真实搜索过程）
+      if (true_distance < current_bsf) {
+        current_bsf = true_distance;
+      }
       
-//       // 写入批次汇总结果
-//       batch_summary_file << batch_i << "," << error_i << ","
-//                          << std::fixed << std::setprecision(5) << avg_fully_accessed_ratio << ","
-//                          << avg_wrong_pruned_ratio << std::endl;
-//     }
-//   }
+      total_leaf_nodes++;
+      
+      // 关键：只有当访问到target_node时，才进行剪枝判断
+      if (node_id == target_node_id) {
+        bool node_preserved = true;  // 默认保留
+        
+        if (current_node.get().has_active_filter()) {
+          VALUE_TYPE abs_error = current_node.get().get_filter_abs_error_interval_by_pos(error_i);
+          VALUE_TYPE pred_distance = current_node.get().get_filter_pred_distance(query_id);
+          
+          // 剪枝条件：如果预测距离减去误差大于当前BSF，则被剪枝
+          if (pred_distance - abs_error > current_bsf) {
+            node_preserved = false;  // 被剪枝
+            if (debug_print) {
+              printf("target_node %ld 被剪枝: pred_dist-error=%.6f > bsf=%.6f (访问顺序: %ld)\n", 
+                     node_id, pred_distance - abs_error, current_bsf, total_leaf_nodes);
+            }
+          } else {
+            if (debug_print) {
+              printf("target_node %ld 保留: pred_dist-error=%.6f <= bsf=%.6f (访问顺序: %ld)\n", 
+                     node_id, pred_distance - abs_error, current_bsf, total_leaf_nodes);
+            }
+          }
+        } else {
+          // 没有过滤器的节点总是被保留
+          if (debug_print) {
+            printf("target_node %ld 保留: 无过滤器 (访问顺序: %ld)\n", node_id, total_leaf_nodes);
+          }
+        }
+        
+        if (node_preserved) {
+          hit_count = 1;  // k=1情况下，target_node被保留则hit_count=1
+        } else {
+          hit_count = 0;  // k=1情况下，target_node被剪枝则hit_count=0
+        }
+      }
+      
+    } else {
+      // 处理内部节点，将子节点加入队列
+      for (auto child_node : node_to_visit.get()) {
+        VALUE_TYPE child_lower_bound = 0;  // 简化处理
+        local_leaf_min_heap.push(std::make_tuple(child_node, child_lower_bound));
+      }
+    }
+  }
   
-//   batch_summary_file.close();
-//   printf("已保存批次访问汇总数据到 %s\n", batch_summary_path.c_str());
+  if (debug_print) {
+    printf("总访问节点数: %ld\n", total_leaf_nodes);
+    printf("target_node保留状态 (hit_count): %ld\n", hit_count);
+    printf("当前查询的召回率: %.4f\n", (double)hit_count);
+  }
   
-//   return SUCCESS;
-// }
+  return hit_count;
+}
 
 
 
-// // 新增：保存(recall, coverage, error)三元组到CSV文件，针对每个filter的每个batch
-// RESPONSE dstree::Allocator::save_recall_coverage_error_pairs(
-//     const std::vector<std::vector<std::pair<ERROR_TYPE, ERROR_TYPE>>>& error_recall_cov_pairs) {
+
+
+// 计算每个误差分位数下的(recall, coverage)对并用于filter拟合
+RESPONSE dstree::Allocator::calculate_alpha_based_recall_coverage_pairs() {
+  // 优先使用模拟的完整搜索召回率数据，如果不存在则使用原始数据
+  std::vector<std::vector<ERROR_TYPE>>* recalls_data = nullptr;
+  
+  if (!batch_validation_recalls_simulated_.empty()) {
+    printf("使用模拟完整搜索的召回率数据进行计算\n");
+    recalls_data = &batch_validation_recalls_simulated_;
+  } else if (!batch_validation_recalls_.empty()) {
+    printf("使用原始召回率数据进行计算\n");
+    recalls_data = &batch_validation_recalls_;
+  } else {
+    printf("错误: 未找到批次召回率数据\n");
+    return FAILURE;
+  }
+  
+  ID_TYPE num_batches = recalls_data->size();
+  ID_TYPE num_error_quantiles = (*recalls_data)[0].size();
+  
+  // 存储每个误差分位数下的(recall, coverage)对
+  std::vector<std::vector<std::pair<ERROR_TYPE, ERROR_TYPE>>> error_recall_cov_pairs(num_error_quantiles);
+  
+  // 遍历每个误差分位数
+  for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
+    // 收集该误差分位数下所有批次的召回率， recalls是一列的内容
+    std::vector<ERROR_TYPE> recalls;
+    for (ID_TYPE batch_i = 0; batch_i < num_batches; ++batch_i) {
+      recalls.push_back((*recalls_data)[batch_i][error_i]);
+    }
     
-//     printf("\n开始保存(recall, coverage, error)三元组汇总表格\n");
-//     // 检查输入数据是否为空
-//     if (error_recall_cov_pairs.empty()) {
-//         printf("错误: 没有可保存的(recall, coverage)对数据\n");
-//         return FAILURE;
-//     }
-    
-//     ID_TYPE num_error_quantiles = error_recall_cov_pairs.size();
-//     // 确定保存路径
-//     std::string save_path = config_.get().save_path_;
-    
-//     // 确保目录存在
-//     if (!save_path.empty()) {
-//       namespace fs = boost::filesystem;
-//       if (!fs::exists(save_path)) {
-//         printf("创建结果保存目录: %s\n", save_path.c_str());
-//         fs::create_directories(save_path);
-//       }
-//     }
-    
-//     // 查询校准集批次信息和filter信息
-//     ID_TYPE num_batches = 0;
-//     ID_TYPE examples_per_batch = 0;
-//     std::vector<std::vector<ID_TYPE>> batch_query_ids;
-//     bool found_calibration_info = false;
-    
-//     // 从任意一个有效过滤器中获取校准批次信息
-//     for (size_t i = 0; i < filter_infos_.size() && !found_calibration_info; ++i) {
-//         auto& filter_info = filter_infos_[i];
-//         if (filter_info.node_.get().has_active_filter()) {
-//             auto& filter = filter_info.node_.get().get_filter().get();
-//             if (!filter.get_batch_calib_query_ids().empty()) {
-//                 batch_query_ids = filter.get_batch_calib_query_ids();
-//                 num_batches = batch_query_ids.size();
-//                 examples_per_batch = batch_query_ids[0].size();
-//                 found_calibration_info = true;
-//                 printf("从节点 %ld 获取到校准批次信息: %ld 批次, 每批约 %ld 样本\n", 
-//                         filter_info.node_.get().get_id(), num_batches, examples_per_batch);
-//             }
-//          }
-//       }
-    
-//     if (!found_calibration_info) {
-//         printf("错误: 未找到任何有效的校准批次信息，无法生成三元组\n");
-//         return FAILURE;
-//     }
-    
-//     // 为每个filter创建对应的表格
-//     for (size_t filter_idx = 0; filter_idx < filter_infos_.size(); ++filter_idx) {
-//         auto& filter_info = filter_infos_[filter_idx];
-//         if (!filter_info.node_.get().has_active_filter()) {
-//             continue;  // 跳过没有激活过滤器的节点
-//         }
-//         ID_TYPE filter_id = filter_info.node_.get().get_id();
-//         // 获取此过滤器的batch_alphas
-//         const auto& filter = filter_info.node_.get().get_filter().get();
-//         const auto& batch_alphas = filter.get_batch_alphas();
+    // 对每个排序后的召回率计算覆盖率 (好像还没排序呢？)
+    for (ID_TYPE j = 0; j < recalls.size(); ++j) {
+      ERROR_TYPE min_recall = recalls[j];
+      ID_TYPE satisfying_batches = 0;
+      // 计算达到min_recall的批次数量
+      for (ID_TYPE batch_i = 0; batch_i < num_batches; ++batch_i) {
+        if ((*recalls_data)[batch_i][error_i] >= min_recall) {
+            satisfying_batches++;
+        }
+      }     
+      ERROR_TYPE coverage = static_cast<ERROR_TYPE>(satisfying_batches) / num_batches;
+      error_recall_cov_pairs[error_i].emplace_back(min_recall, coverage);
+    }
+
+  }
+  
+  // 打印和保存error_recall_cov_pairs矩阵
+  printf("\n==== error_recall_cov_pairs矩阵 ====\n");
+  printf("行表示pair索引，列表示error_i误差分位数，每个位置是(recall, coverage)对\n");
+  printf("每列已按recall升序排序\n\n");
+  
+  // 计算最大行数（最大的pair数量）
+  size_t max_pairs = 0;
+  for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
+    max_pairs = std::max(max_pairs, error_recall_cov_pairs[error_i].size());
+  }
+  
+  // 确保save_path存在
+  std::string save_path = config_.get().save_path_;
+  if (!save_path.empty()) {
+    namespace fs = boost::filesystem;
+    if (!fs::exists(save_path)) {
+      fs::create_directories(save_path);
+    }
+  }
+  
+
+  // 保存(recall, coverage)对到CSV文件
+  save_recall_alpha_based_coverage_pairs(error_recall_cov_pairs);
+
+
+
+
+
+  // 在for循环之前初始化变量用于计算平均alpha
+  std::vector<VALUE_TYPE> all_filter_alphas;
+  size_t valid_filter_count = 0;
+  
+  std::string lgbm_data_dir = save_path + "/lgbm_data";
+  namespace fs = boost::filesystem;
+  if (!fs::exists(lgbm_data_dir)) {
+    fs::create_directories(lgbm_data_dir);
+    printf("创建LightGBM数据目录: %s\n", lgbm_data_dir.c_str());
+  }
+  
+  // 为每个filter训练统一的二元回归模型
+  for (auto& filter_info : filter_infos_) {
+    if (filter_info.node_.get().has_active_filter()) {
+      auto& filter = filter_info.node_.get().get_filter().get();
+      
+      // printf("\n====================为节点 %ld 训练统一的二元回归模型===============\n", filter_info.node_.get().get_id());
+      spdlog::info("\n================为节点 {} 训练统一的二元回归模型=================\n", filter_info.node_.get().get_id());
+      // 收集所有误差分位数下的所有(recall, coverage)对和对应的误差位置
+      std::vector<ERROR_TYPE> all_recalls;
+      std::vector<ERROR_TYPE> all_coverages;
+      std::vector<ID_TYPE> all_error_indices; // 仍然需要误差索引
+      std::vector<ERROR_TYPE> all_errors;     // 新增：对应的实际误差值
+      
+      // 存储唯一的(recall-coverage)对及其最大error_i
+      std::unordered_map<std::string, ID_TYPE> unique_pairs_max_error; // 改为只存储max_error_i
+      // 从所有误差分位数收集数据并去重
+      for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
+        for (ID_TYPE batch_i = 0; batch_i < error_recall_cov_pairs[error_i].size(); ++batch_i) {
+          const auto& [recall, coverage] = error_recall_cov_pairs[error_i][batch_i];
+          // 创建唯一键
+          std::string key = fmt::format("{:.6f}_{:.6f}", recall, coverage);
+          // 检查是否已存在该(recall, coverage)对
+          auto it = unique_pairs_max_error.find(key);
+          if (it != unique_pairs_max_error.end()) {
+            // 如果存在且当前误差索引大于已保存的，则更新
+            if (error_i > it->second) {
+              it->second = error_i;
+            }
+          } else {
+            // 如果不存在，则添加
+            unique_pairs_max_error[key] = error_i;
+          }
+        }
+      }
+      
+      // 使用唯一的(recall, coverage)对和它们的最大误差索引, 获取去重之后的(recall, coverage, error_value)对
+      // printf("========= 利用unique_pairs_max_error开始生成all_recalls, all_coverages, all_error_indices, all_errors=========\n");
+      for (const auto& [key, max_error_i] : unique_pairs_max_error) {
+        // 从key中提取recall和coverage
+        float recall, coverage;
+        sscanf(key.c_str(), "%f_%f", &recall, &coverage);
         
-//         if (batch_alphas.empty()) {
-//             printf("警告: 过滤器 %ld 的batch_alphas为空，跳过\n", (long)filter_id);
-//             continue;
-//         }
+        all_recalls.push_back(recall);
+        all_coverages.push_back(coverage);
+        all_error_indices.push_back(max_error_i);
         
-//         // 新增: 存储每个filter的唯一(recall, coverage)对及其最大误差值
-//         struct RecallCovErrorTriple {
-//             ERROR_TYPE recall;
-//             ERROR_TYPE coverage;
-//             VALUE_TYPE error;
-//             ID_TYPE batch_id;   // 记录来源批次
-//             ID_TYPE error_idx;  // 记录误差索引
-//         };
+        VALUE_TYPE error_value = filter_info.node_.get().get_filter_abs_error_interval_by_pos(max_error_i);
+        all_errors.push_back(error_value);
+
+        // 获取对应的误差值（从alphas_数组中）
+        // if (auto* cp = filter.get_conformal_predictor(); cp != nullptr) {
+        //   VALUE_TYPE error_value = cp->get_alpha_by_pos(max_error_i);
+        //   all_errors.push_back(error_value);
+        // }
+      }
+
+      // printf("========= 开始生成unique_pairs_max_error.size(): %zu =========\n", unique_pairs_max_error.size());
+      std::vector<std::tuple<float, float, float>> unique_pairs_with_errors;
+      for (const auto& [key, max_error_i] : unique_pairs_max_error) {
+          float recall, coverage;
+          sscanf(key.c_str(), "%f_%f", &recall, &coverage);
+          VALUE_TYPE error_value = filter_info.node_.get().get_filter_abs_error_interval_by_pos(max_error_i);
+          unique_pairs_with_errors.emplace_back(recall, coverage, error_value);
+          // printf("recall: %f, coverage: %f, error_value: %f (from alphas_[%ld])\n", recall, coverage, error_value, max_error_i);
+      }
+      // 按照召回率排序
+      std::sort(unique_pairs_with_errors.begin(), unique_pairs_with_errors.end());
+      // 保存每个filter的三元组数据到单独的txt文件
+      ID_TYPE filter_id = filter_info.node_.get().get_id();
+      std::string filter_data_path = lgbm_data_dir + "/filter_" + std::to_string(filter_id) + "_triples.csv";
+      std::ofstream filter_file(filter_data_path);
+      
+      if (filter_file.is_open()) {
+        filter_file << "recall,coverage,error,is_test" << std::endl;
+        // 使用80%的数据作为训练集，20%作为测试集
+        size_t total_pairs = unique_pairs_with_errors.size();
+        size_t test_size = static_cast<size_t>(total_pairs * 0.3);
+        // 创建一个随机索引数组，用于随机选择测试样本
+        std::vector<size_t> indices(total_pairs);
+        for (size_t i = 0; i < total_pairs; ++i) {
+          indices[i] = i;
+        }
+        // 随机打乱索引
+        std::random_device rd;
+        std::mt19937 g(rd());
+        std::shuffle(indices.begin(), indices.end(), g);
+        // 创建一个集合，存储测试集索引
+        std::unordered_set<size_t> test_indices;
+        for (size_t i = 0; i < test_size; ++i) {
+          test_indices.insert(indices[i]);
+        }
+        // 写入数据行
+        for (size_t i = 0; i < unique_pairs_with_errors.size(); ++i) {
+          const auto& [recall, coverage, error_value] = unique_pairs_with_errors[i];
+          // 判断是训练集(0)还是测试集(1)
+          int is_test = test_indices.count(i) > 0 ? 1 : 0;
+          filter_file << std::fixed << std::setprecision(6) 
+                     << recall << "," 
+                     << coverage << "," 
+                     << error_value << "," 
+                     << is_test << std::endl;
+        }
         
-//         std::vector<RecallCovErrorTriple> unique_triples;
-//         std::unordered_map<std::string, size_t> unique_pairs_map; // 键 -> triples中的索引
-        
-//         // 为每个batch收集所有误差分位数下的recall, coverage, error三元组
-//         for (ID_TYPE batch_i = 0; batch_i < num_batches; ++batch_i) {
-//             // 为每个误差分位数收集该batch下的recall值
-//             std::vector<ERROR_TYPE> batch_recalls(num_error_quantiles);
+        filter_file.close();
+        // printf("已保存Filter %ld 的三元组数据到: %s (共 %zu 个三元组)\n", 
+        //        filter_id, filter_data_path.c_str(), unique_pairs_with_errors.size());
+      } else {
+        printf("警告: 无法创建文件: %s\n", filter_data_path.c_str());
+      }
+      
+      // 检查数据点数量是否足够
+      const size_t min_required_samples = 1; // 最小样本数要求
+      if (unique_pairs_with_errors.size() < min_required_samples) {
+          printf("警告: 节点 %ld 的数据点数量(%zu)不足以训练模型(最少需要%zu个点)\n", 
+                 filter_info.node_.get().get_id(), unique_pairs_with_errors.size(), min_required_samples);
+          spdlog::warn("节点 {} 的数据点数量({})不足以训练模型(最少需要{}个点)", 
+                      filter_info.node_.get().get_id(), unique_pairs_with_errors.size(), min_required_samples);
+          continue; // 跳过训练
+      }
+
+
+
+      // 根据配置选择使用的模型类型
+      if (config_.get().use_train_optimal_polynomial_model_) {
+          // 使用二元回归模型
+          printf("=======train_regression_model_for_recall_coverage=======\n");
+          if (filter_info.node_.get().train_regression_model_for_recall_coverage(
+                  all_recalls, all_coverages, all_error_indices, 
+                  filter_info.node_.get().get_id()) != SUCCESS) {
+              printf("警告: 节点 %ld 训练统一的二元回归模型失败\n", filter_info.node_.get().get_id());
+              spdlog::error("警告: 节点 {} 训练统一的二元回归模型失败", filter_info.node_.get().get_id());
+              continue;
+          }
+
+      } else {
+          // 使用Eigen二次样条模型
+          // printf("----  fit_alglib_quadratic_spline ----\n");
+          // 创建一个存储模型系数的向量  fit_eigen_quadratic_spline   fit_alglib_quadratic_spline
+          std::vector<double> alglib_spline_coeffs;
+          if (!all_errors.empty() && filter_info.node_.get().fit_eigen_quadratic_spline(
+                  all_recalls, all_coverages, all_errors, 
+                  alglib_spline_coeffs) != SUCCESS) {
+              printf("警告: 节点 %ld alglib二次样条模型拟合失败\n", 
+                    filter_info.node_.get().get_id());
+              spdlog::error("警告: 节点 {} alglib二次样条模型拟合失败", 
+                          filter_info.node_.get().get_id());
+          }
+          // 此时eigen_spline_coeffs已包含模型系数，但实际上不需要使用它
+          // 因为函数内部已将系数保存到regression_coeffs_成员变量
+      }
+
+
+      // 使用训练好的模型进行预测和设置
+      ERROR_TYPE target_recall = config_.get().filter_conformal_recall_;
+      ERROR_TYPE target_coverage = config_.get().filter_conformal_coverage_;
+      // 最后只使用用户指定的值实际设置alpha
+      RESPONSE result_target = filter_info.node_.get().set_filter_abs_error_interval_by_recall_and_coverage(
+          target_recall, target_coverage);
+      if (result_target == SUCCESS) {
+          VALUE_TYPE alpha = filter_info.node_.get().get_filter_abs_error_interval();
+          all_filter_alphas.push_back(alpha);
+          valid_filter_count++;
+          spdlog::info("Filter {} 在 R={:.2f}, C={:.2f} 下的alpha值: {:.4f}", 
+                  filter_info.node_.get().get_id(), target_recall, target_coverage, alpha);
+          // printf("(Filter %ld 在 R=%.2f, C=%.2f, alpha=%.4f)\n", filter_info.node_.get().get_id(), target_recall, target_coverage, filter_info.node_.get().get_filter_abs_error_interval());  
+      }
+      
+    }
+  }
+
+  // 在循环结束后计算平均alpha
+  if (!all_filter_alphas.empty()) {
+    VALUE_TYPE total_alpha = 0.0;
+    for (auto alpha : all_filter_alphas){
+      total_alpha += alpha;
+    }
+    VALUE_TYPE average_alpha = total_alpha / all_filter_alphas.size();
+    // printf("\n 满足target recall和coverage的平均预测alpha值: %.4f\n", average_alpha);
+  }
+
+
+  
+  return SUCCESS;
+}
+
+
+
+
+
+
+// 保存(recall, coverage)对到CSV文件
+RESPONSE dstree::Allocator::save_recall_alpha_based_coverage_pairs(
+    const std::vector<std::vector<std::pair<ERROR_TYPE, ERROR_TYPE>>>& error_recall_cov_pairs) {
+    // printf("\n开始保存(recall, coverage, error)三元组到CSV文件\n");
+    // 检查输入数据是否为空
+    if (error_recall_cov_pairs.empty()) {
+        printf("错误: 没有可保存的三元组数据\n");
+        return FAILURE;
+    }
+    ID_TYPE num_error_quantiles = error_recall_cov_pairs.size();
+    std::string save_path = config_.get().save_path_;
+    // 确保目录存在
+    if (!save_path.empty()) {
+      namespace fs = boost::filesystem;
+      if (!fs::exists(save_path)) {
+        printf("创建结果保存目录: %s\n", save_path.c_str());
+        fs::create_directories(save_path);
+      }
+    }
+    // 创建子文件夹 lgbm_raw_data
+    std::string lgbm_raw_data_dir = save_path + "/lgbm_raw_data";
+    if (!fs::exists(lgbm_raw_data_dir)) {
+      fs::create_directories(lgbm_raw_data_dir);
+    }
+    
+    // 为每个过滤器分别保存一个CSV文件
+    for (auto& filter_info : filter_infos_) {
+        if (filter_info.node_.get().has_active_filter()) {
+            ID_TYPE filter_id = filter_info.node_.get().get_id();
+            auto& filter = filter_info.node_.get().get_filter().get();
+            // 构造CSV文件名
+            std::string csv_filename = lgbm_raw_data_dir + "/filter_" + std::to_string(filter_id) + "_raw_data.csv";
+            // 打开CSV文件
+            std::ofstream csv_file(csv_filename);
+            if (!csv_file.is_open()) {
+                printf("错误: 无法创建CSV文件 %s\n", csv_filename.c_str());
+                continue;
+            }
             
-//             // 从batch_validation_recalls_获取该batch下所有误差分位数的recall值
-//             for (ID_TYPE error_i = 0; error_i < num_error_quantiles && error_i < batch_validation_recalls_[batch_i].size(); ++error_i) {
-//                 batch_recalls[error_i] = batch_validation_recalls_[batch_i][error_i];
-//             }
+            // 直接使用error_recall_cov_pairs中的数据，不重新计算
+            std::vector<std::vector<std::tuple<ERROR_TYPE, ERROR_TYPE, ERROR_TYPE>>> 
+                batch_data(error_recall_cov_pairs[0].size(), std::vector<std::tuple<ERROR_TYPE, ERROR_TYPE, ERROR_TYPE>>(num_error_quantiles));
             
-//             // 对于每个error_quantile生成(recall,coverage,error)三元组
-//             for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
-//                 if (error_i >= batch_alphas[batch_i].size()) {
-//                     continue;  // 跳过没有误差值的情况
-//                 }
-                
-//                 // 获取此batch在此error_quantile下的recall值
-//                 ERROR_TYPE recall = batch_recalls[error_i];
-                
-//                 // 计算coverage - 有多少批次达到这个recall值
-//                 ID_TYPE satisfying_batches = 0;
-//                 for (ID_TYPE other_batch_i = 0; other_batch_i < num_batches; ++other_batch_i) {
-//                     if (error_i < batch_validation_recalls_[other_batch_i].size() && 
-//                         batch_validation_recalls_[other_batch_i][error_i] >= recall) {
-//                         satisfying_batches++;
-//                     }
-//                 }
-//                 ERROR_TYPE coverage = static_cast<ERROR_TYPE>(satisfying_batches) / num_batches;
-                
-//                 // 获取误差值
-//                 VALUE_TYPE error_value = batch_alphas[batch_i][error_i];
-                
-//                 // 创建唯一键
-//                 std::string key = fmt::format("{:.6f}_{:.6f}", recall, coverage);
-                
-//                 // 检查是否已存在该(recall, coverage)对
-//                 auto it = unique_pairs_map.find(key);
-//                 if (it != unique_pairs_map.end()) {
-//                     // 已存在，检查误差值
-//                     size_t idx = it->second;
-//                     if (error_value > unique_triples[idx].error) {
-//                         // 更新为更大的误差值
-//                         unique_triples[idx].error = error_value;
-//                         unique_triples[idx].batch_id = batch_i;
-//                         unique_triples[idx].error_idx = error_i;
-//                     }
-//                 } else {
-//                     // 不存在，添加新三元组
-//                     unique_pairs_map[key] = unique_triples.size();
-//                     unique_triples.push_back({recall, coverage, error_value, batch_i, error_i});
-//                 }
-//             }
-//         }
-        
-//         // 保存去重后的三元组结果
-//         std::string table_path = save_path + "/filter_" + std::to_string(filter_id) + "_recall_cov_error.csv";
-//         std::ofstream table_file(table_path);
-//         if (!table_file.is_open()) {
-//             printf("错误: 无法创建表格文件 %s\n", table_path.c_str());
-//             continue;
-//         }
-        
-//         // 写入表格表头
-//         table_file << "batch_id_sorted,recall,coverage,actual_error,error_quantile" << std::endl;
-        
-//         // 写入去重后的数据
-//         for (const auto& triple : unique_triples) {
-//             table_file << triple.batch_id << ","
-//                       << std::fixed << std::setprecision(4) << triple.recall << ","
-//                       << std::fixed << std::setprecision(4) << triple.coverage << ","
-//                       << std::fixed << std::setprecision(6) << triple.error << ","
-//                       << triple.error_idx << std::endl;
-//         }
-        
-//         table_file.close();
-//         // printf("已保存过滤器 %ld 的去重后三元组数据: %s (共 %zu 个唯一三元组)\n", 
-//         //        (long)filter_id, table_path.c_str(), unique_triples.size());
-        
-//         // 同时保存原始的每批次数据（可选）
-//         std::string original_table_path = save_path + "/filter_" + std::to_string(filter_id) + "_raw_data.csv";
-//         std::ofstream original_table_file(original_table_path);
-//         if (original_table_file.is_open()) {
-//             // 写入表格表头
-//             original_table_file << "batch_id_sorted";
-//             for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
-//                 original_table_file << ",recall,cov,actual error";
-//             }
-//             original_table_file << std::endl;
-            
-//             // 为每个batch写入完整数据
-//             for (ID_TYPE batch_i = 0; batch_i < num_batches; ++batch_i) {
-//                 // 写入batch_id
-//                 original_table_file << batch_i;
-                
-//                 // 对于每个error_quantile写入(recall,coverage,error)
-//                 for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
-//                     if (error_i >= batch_alphas[batch_i].size()) {
-//                         // 没有此误差分位数的数据
-//                         original_table_file << ",,,";
-//                         continue;
-//                     }
+            // 直接从error_recall_cov_pairs读取recall和coverage
+            for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
+                for (ID_TYPE batch_i = 0; batch_i < error_recall_cov_pairs[error_i].size(); ++batch_i) {
+                    ERROR_TYPE recall = error_recall_cov_pairs[error_i][batch_i].first;
+                    ERROR_TYPE coverage = error_recall_cov_pairs[error_i][batch_i].second;
+                    // error现在换成alphas中的误差
+                    ERROR_TYPE error = filter_info.node_.get().get_filter_abs_error_interval_by_pos(error_i);
                     
-//                     // 获取此batch在此error_quantile下的recall值
-//                     ERROR_TYPE recall = (error_i < batch_validation_recalls_[batch_i].size()) ?
-//                                        batch_validation_recalls_[batch_i][error_i] : 0.0;
-//                    
-//                     // 计算coverage
-//                     ID_TYPE satisfying_batches = 0;
-//                     for (ID_TYPE other_batch_i = 0; other_batch_i < num_batches; ++other_batch_i) {
-//                         if (error_i < batch_validation_recalls_[other_batch_i].size() && 
-//                             batch_validation_recalls_[other_batch_i][error_i] >= recall) {
-//                             satisfying_batches++;
-//                         }
-//                     }
-//                     ERROR_TYPE coverage = static_cast<ERROR_TYPE>(satisfying_batches) / num_batches;
-//                    
-//                     // 获取误差值
-//                     VALUE_TYPE error_value = batch_alphas[batch_i][error_i];
-//                    
-//                     // 写入(recall,coverage,error)三元组
-//                     original_table_file << "," << std::fixed << std::setprecision(4) << recall
-//                                       << "," << std::fixed << std::setprecision(4) << coverage
-//                                       << "," << std::fixed << std::setprecision(6) << error_value;
-//                 }
-//                 original_table_file << std::endl;
-//             }
+                    batch_data[batch_i][error_i] = std::make_tuple(recall, coverage, error);
+                    // printf("batch_i=%ld, error_i=%ld, recall=%.3f, coverage=%.3f, error=%.6f\n", batch_i, error_i, recall, coverage, error);
+                }
+                
+                // 按照recall升序排序当前误差分位的所有批次
+                std::vector<std::pair<ID_TYPE, std::tuple<ERROR_TYPE, ERROR_TYPE, ERROR_TYPE>>> batch_with_index;
+                for (ID_TYPE batch_i = 0; batch_i < error_recall_cov_pairs[error_i].size(); ++batch_i) {
+                    batch_with_index.push_back({batch_i, batch_data[batch_i][error_i]});
+                }
+                std::sort(batch_with_index.begin(), batch_with_index.end(),
+                         [](const auto& a, const auto& b) {
+                             return std::get<0>(a.second) < std::get<0>(b.second); // 按照recall排序
+                         });
+                // 更新排序后的数据
+                for (ID_TYPE i = 0; i < batch_with_index.size(); ++i) {
+                    batch_data[i][error_i] = batch_with_index[i].second;
+                }
+            }
+
+            // 写入CSV标题行
+            csv_file << "batch_id_sorted";
+            for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
+                csv_file << ",recall,cov,actual error";
+            }
+            csv_file << std::endl;
             
-//             original_table_file.close();
-//             // printf("同时保存了过滤器 %ld 的原始数据: %s\n", (long)filter_id, original_table_path.c_str());
-//         }
-//     }
+            // 写入每个批次的数据
+            for (ID_TYPE batch_i = 0; batch_i < error_recall_cov_pairs[0].size(); ++batch_i) {
+                csv_file << batch_i;
+                
+                // 遍历每个误差分位
+                for (ID_TYPE error_i = 0; error_i < num_error_quantiles; ++error_i) {
+                    auto [recall, coverage, error] = batch_data[batch_i][error_i];
+                    
+                    // 写入召回率、覆盖率和误差值，保留4位小数
+                    csv_file << "," << std::fixed << std::setprecision(4) << recall
+                             << "," << std::fixed << std::setprecision(4) << coverage
+                             << "," << std::fixed << std::setprecision(6) << error;
+                }
+                csv_file << std::endl;
+            }
+            
+            // 关闭CSV文件
+            csv_file.close();
+            // printf("已成功保存过滤器 %ld 的(recall, coverage, error)三元组到 %s\n", 
+            //        filter_id, csv_filename.c_str());
+        }
+    }
     
-//     printf("已完成所有过滤器的数据表格保存\n");
-//     return SUCCESS;
-// }
-
-
-
+    return SUCCESS;
+} 
 
